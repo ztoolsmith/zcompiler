@@ -35,6 +35,8 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with: { version: "${{ env.ZIG_VERSION }}" }
       - uses: pnpm/action-setup@v4
+        with:
+          version: 11.8.0
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm, cache-dependency-path: zcompiler/pnpm-lock.yaml }
       - name: Build zignapi
@@ -73,6 +75,8 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with: { version: "${{ env.ZIG_VERSION }}" }
       - uses: pnpm/action-setup@v4
+        with:
+          version: 11.8.0
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - name: Build zignapi
@@ -104,6 +108,8 @@ jobs:
           repository: ${{ github.repository_owner }}/zignapi
           path: zignapi
       - uses: pnpm/action-setup@v4
+        with:
+          version: 11.8.0
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm, cache-dependency-path: zcompiler/pnpm-lock.yaml }
       - name: Build zignapi (CLI pour prepublish)
