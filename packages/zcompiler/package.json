@@ -1,0 +1,56 @@
+{
+  "name": "zcompiler",
+  "version": "0.1.0",
+  "description": "Parser écrit en Zig pour Node.js, via zignapi",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "bindings.js",
+    "wasm.js",
+    "wasm.d.ts",
+    "zcompiler.wasm"
+  ],
+  "scripts": {
+    "build": "zignapi build",
+    "test": "node --test",
+    "prepublishOnly": "zignapi build"
+  },
+  "zignapi": {
+    "binaryName": "zcompiler",
+    "packageName": "@zcompiler/binding",
+    "targets": [
+      "darwin-arm64",
+      "darwin-x64",
+      "linux-x64-gnu",
+      "linux-x64-musl",
+      "linux-arm64-gnu",
+      "win32-x64-msvc",
+      "wasm"
+    ]
+  },
+  "devDependencies": {
+    "zignapi": "file:../../../zignapi/packages/zignapi"
+  },
+  "license": "MIT",
+  "optionalDependencies": {
+    "@zcompiler/binding-darwin-arm64": "0.0.1",
+    "@zcompiler/binding-darwin-x64": "0.0.1",
+    "@zcompiler/binding-linux-arm64-gnu": "0.0.1",
+    "@zcompiler/binding-linux-x64-gnu": "0.0.1",
+    "@zcompiler/binding-linux-x64-musl": "0.0.1",
+    "@zcompiler/binding-win32-x64-msvc": "0.0.1"
+  },
+  "browser": "wasm.js",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "browser": "./wasm.js",
+      "node": "./index.js",
+      "default": "./wasm.js"
+    },
+    "./bindings.js": "./bindings.js",
+    "./wasm.js": "./wasm.js"
+  }
+}

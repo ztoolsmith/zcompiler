@@ -1,0 +1,16 @@
+{
+  "name": "zparse-monorepo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r run build",
+    "test": "pnpm -r run test",
+    "clean": "pnpm -r exec rm -rf dist zig-out .zig-cache"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.28.1",
+    "typescript": "^5.7.2"
+  },
+  "packageManager": "pnpm@11.8.0"
+}

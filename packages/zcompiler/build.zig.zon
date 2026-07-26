@@ -1,0 +1,14 @@
+.{
+    .name = .zparse,
+    .version = "0.0.1",
+    .fingerprint = 0xf8cfc71e4918958, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zignapi = .{ .path = "../../../zignapi/packages/zignapi" },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "native",
+    },
+}

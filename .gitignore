@@ -1,0 +1,21 @@
+node_modules/
+dist/
+zig-out/
+.zig-cache/
+zig-cache/
+*.node
+*.wasm
+
+CLAUDE.md
+
+# Générés par `zignapi build` (loader natif, glue wasm, packages de plateforme)
+/packages/*/index.js
+/packages/*/index.d.ts
+/packages/*/bindings.js
+/packages/*/wasm.js
+/packages/*/wasm.d.ts
+/packages/*/npm/
+
+# Corpus tiers (installé via corpus/package.json). Le RESTE de corpus/ est
+# versionné et sert à la CI : broken/, jsx/, ts/, tsx/, unicode/, nosemi/.
+/corpus/node_modules/

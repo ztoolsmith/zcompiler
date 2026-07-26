@@ -1,0 +1,143 @@
+name: Release
+
+# Déclenché par un tag v* (ex. v0.2.0). Le job principal (ci.yml) sert de gate :
+# tout vert ou rien. Ensuite on collecte les binaires de TOUS les triples (Linux
+# cross-compile darwin+linux+wasm ; Windows fournit le .node MSVC), on assemble
+# les packages, on rejoue la prod simulée, et on SORT les artefacts.
+#
+# La publication npm reste MANUELLE pour la 0.2.0 (npm publish à la main depuis
+# les artefacts téléchargés — tu regardes ta première release partir).
+# TODO 0.3.0 : automatiser avec un secret NPM_TOKEN + `npm publish --provenance`.
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  ZIG_VERSION: 0.16.0
+
+jobs:
+  # Tout le job principal (test + snapshot + witness) en préalable.
+  gate:
+    uses: ./.github/workflows/ci.yml
+
+  # Linux : les 5 triples darwin/linux + le wasm + les JS générés.
+  linux-artifacts:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: zcompiler }
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/zignapi
+          path: zignapi
+      - uses: mlugg/setup-zig@v1
+        with: { version: "${{ env.ZIG_VERSION }}" }
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm, cache-dependency-path: zcompiler/pnpm-lock.yaml }
+      - name: Build zignapi
+        working-directory: zignapi
+        run: pnpm install --frozen-lockfile=false && pnpm --filter zignapi build
+      - name: Install + build
+        working-directory: zcompiler
+        run: pnpm install --frozen-lockfile=false
+      - name: Cross-compile darwin+linux + wasm + génère les JS
+        working-directory: zcompiler/packages/zcompiler
+        run: |
+          pnpm exec zignapi build            # natif hôte + bindings.js/index.js/index.d.ts
+          pnpm exec zignapi build --target wasm
+          pnpm exec zignapi build --all || true   # les 5 triples cross (win32 échoue ici)
+          # tar déterministe des JS générés + les 5 npm/<triple>/ non-Windows.
+          tar czf /tmp/linux.tgz \
+            npm/darwin-arm64 npm/darwin-x64 npm/linux-x64-gnu npm/linux-x64-musl npm/linux-arm64-gnu \
+            index.js bindings.js index.d.ts wasm.js wasm.d.ts zcompiler.wasm
+      - name: Upload artefacts Linux
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: /tmp/linux.tgz
+
+  # Windows : le seul binaire que Zig ne cross-compile pas depuis Linux (libc MSVC).
+  windows-artifacts:
+    needs: gate
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: zcompiler }
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/zignapi
+          path: zignapi
+      - uses: mlugg/setup-zig@v1
+        with: { version: "${{ env.ZIG_VERSION }}" }
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Build zignapi
+        working-directory: zignapi
+        run: pnpm install --frozen-lockfile=false && pnpm --filter zignapi build
+      - name: Install
+        working-directory: zcompiler
+        run: pnpm install --frozen-lockfile=false
+      - name: Build + package win32-x64-msvc
+        working-directory: zcompiler/packages/zcompiler
+        run: |
+          pnpm exec zignapi build --target win32-x64-msvc
+          tar czf win32.tgz npm/win32-x64-msvc
+      - name: Upload artefact Windows
+        uses: actions/upload-artifact@v4
+        with:
+          name: win32
+          path: zcompiler/packages/zcompiler/win32.tgz
+
+  # Assemblage : tous les binaires réunis → prepublish → prod simulée → artefacts.
+  assemble:
+    needs: [linux-artifacts, windows-artifacts]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: zcompiler }
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/zignapi
+          path: zignapi
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm, cache-dependency-path: zcompiler/pnpm-lock.yaml }
+      - name: Build zignapi (CLI pour prepublish)
+        working-directory: zignapi
+        run: pnpm install --frozen-lockfile=false && pnpm --filter zignapi build
+      - name: Install
+        working-directory: zcompiler
+        run: pnpm install --frozen-lockfile=false
+      - name: Récupère les artefacts (Linux + Windows)
+        uses: actions/download-artifact@v4
+        with: { path: /tmp/artifacts }
+      - name: Déballe tous les binaires dans le package
+        working-directory: zcompiler/packages/zcompiler
+        run: |
+          tar xzf /tmp/artifacts/linux/linux.tgz -C .
+          tar xzf /tmp/artifacts/win32/win32.tgz -C .
+          ls npm/
+      - name: prepublish (assemble npm/<triple>/ + exports map)
+        working-directory: zcompiler/packages/zcompiler
+        run: pnpm exec zignapi prepublish
+      - name: Prod simulée (npm pack → témoin → require + esbuild)
+        working-directory: zcompiler/packages/zcompiler
+        run: node scripts/prod-witness.mjs
+      - name: npm pack (principal + plateformes) → artefacts de sortie
+        working-directory: zcompiler/packages/zcompiler
+        run: |
+          mkdir -p /tmp/out
+          npm pack --pack-destination /tmp/out
+          for d in npm/*/; do (cd "$d" && npm pack --pack-destination /tmp/out); done
+          ls -la /tmp/out
+      - name: Upload des tarballs npm (publication MANUELLE ensuite)
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarballs
+          path: /tmp/out/*.tgz
+      # Publication : télécharger `npm-tarballs`, puis `npm publish <chaque>.tgz`
+      # à la main (accès public pour les packages scopés : `--access public`).

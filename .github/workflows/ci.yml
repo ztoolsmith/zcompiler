@@ -1,0 +1,158 @@
+name: CI
+
+# Deux jobs, pas plus. L'atout Zig : la cross-compilation depuis Linux fait tenir
+# tout (logique + 5 des 6 binaires + le wasm) sur `ubuntu-latest`. Là où napi-rs
+# impose une matrice (macOS + Windows + Linux + Docker musl), il ne reste qu'UNE
+# vraie 2ᵉ plateforme : Windows, à cause de la libc MSVC que Zig ne fournit pas.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call: # réutilisé comme gate par release.yml
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  ZIG_VERSION: 0.16.0 # épinglée = `minimum_zig_version` du build.zig.zon
+
+jobs:
+  # ── Job principal : toute la logique + cross-compilation, sur Linux ──────────
+  main:
+    name: Test + cross + wasm (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout zcompiler
+        uses: actions/checkout@v4
+        with:
+          path: zcompiler
+      # zcompiler dépend de zignapi en SIBLING (chemins ../../../zignapi dans
+      # build.zig.zon + package.json). On le checkout à côté.
+      # NB : adapter le `repository` (et un PAT si le repo zignapi est privé).
+      - name: Checkout zignapi (dépendance sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/zignapi
+          path: zignapi
+
+      - name: Setup Zig ${{ env.ZIG_VERSION }}
+        uses: mlugg/setup-zig@v1 # cache Zig intégré ; ajuster la version d'action si besoin
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: zcompiler/pnpm-lock.yaml
+
+      # zignapi fournit le CLI (`zignapi build`) + le module Zig. On le build une fois.
+      - name: Build zignapi (CLI + module)
+        working-directory: zignapi
+        run: |
+          pnpm install --frozen-lockfile=false
+          pnpm --filter zignapi build
+
+      - name: Install zcompiler
+        working-directory: zcompiler
+        run: pnpm install --frozen-lockfile=false
+
+      - name: Zig unit tests (lexer/parser/printer/…)
+        working-directory: zcompiler/packages/zcompiler
+        run: zig build test
+
+      - name: Build native + wasm
+        working-directory: zcompiler/packages/zcompiler
+        run: |
+          pnpm exec zignapi build
+          pnpm exec zignapi build --target wasm
+
+      - name: node --test (69)
+        working-directory: zcompiler/packages/zcompiler
+        run: pnpm test
+
+      # La batterie corpus (corpus VERSIONNÉ : le tiers `node_modules` est gitignoré).
+      # `corpus.js` sort en code ≠ 0 sur échec → vrai gate.
+      - name: Corpus (parse/roundtrip/transform/semantic/mangle/recovery/ts/jsx/tsx)
+        working-directory: zcompiler
+        run: |
+          node playground/corpus.js corpus/nosemi corpus/unicode
+          node playground/corpus.js --roundtrip corpus/nosemi corpus/unicode
+          node playground/corpus.js --transform corpus/nosemi corpus/unicode
+          node playground/corpus.js --semantic corpus/nosemi corpus/unicode
+          node playground/corpus.js --mangle corpus/nosemi corpus/unicode
+          node playground/corpus.js --recovery corpus/broken
+          node playground/corpus.js --ts-strip corpus/ts
+          node playground/corpus.js --tsx corpus/tsx
+          node playground/corpus.js --jsx-transform corpus/jsx
+
+      # LE juge des deux backends, à chaque commit : le snapshot de TOUTE l'API sur
+      # 92 fichiers, natif vs wasm, doit être byte-identique.
+      - name: Snapshot API — natif == wasm (byte-identique)
+        working-directory: zcompiler/packages/zcompiler
+        run: |
+          DIRS="../../corpus/ts ../../corpus/tsx ../../corpus/jsx ../../corpus/broken ../../corpus/unicode ../../corpus/nosemi"
+          node scripts/api-snapshot.mjs ./index.js $DIRS > native.json
+          node scripts/api-snapshot.mjs ./wasm.js  $DIRS > wasm.json
+          diff native.json wasm.json && echo "✓ deux backends, une vérité"
+
+      # Cross-compilation : les 5 triples non-Windows se produisent depuis Linux.
+      # (Pas de test de CHARGEMENT des binaires étrangers — juste « le build passe » ;
+      #  le chargement se teste au job Windows + au workflow release.)
+      - name: Cross-compile tous les triples (artefacts seulement)
+        working-directory: zcompiler/packages/zcompiler
+        run: |
+          pnpm exec zignapi build --all || true # win32-msvc échoue (SDK MSVC absent)
+          for t in darwin-arm64 darwin-x64 linux-x64-gnu linux-x64-musl linux-arm64-gnu; do
+            test -f "npm/$t/zcompiler.$t.node" || { echo "::error::npm/$t manquant"; exit 1; }
+          done
+          echo "✓ 5 triples cross-compilés"
+
+      # Bundler-witness (esbuild) : npm pack → témoin vide → les conditions d'exports
+      # résolvent bien node→natif et browser→wasm.js, et les deux tournent.
+      - name: Bundler-witness (esbuild) + prod simulée
+        working-directory: zcompiler/packages/zcompiler
+        run: |
+          pnpm exec zignapi prepublish
+          node scripts/prod-witness.mjs
+
+  # ── Job Windows : la seule vraie 2ᵉ plateforme (libc MSVC) ───────────────────
+  windows:
+    name: Build natif + smoke test (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: zcompiler
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/zignapi
+          path: zignapi
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build zignapi
+        working-directory: zignapi
+        run: |
+          pnpm install --frozen-lockfile=false
+          pnpm --filter zignapi build
+      - name: Install zcompiler
+        working-directory: zcompiler
+        run: pnpm install --frozen-lockfile=false
+
+      # Sur windows-latest l'hôte EST win32-x64-msvc → le build natif produit le
+      # .node MSVC directement. Smoke test : on charge le binaire et on parse un
+      # fichier (le job principal couvre la logique ; celui-ci couvre le binaire).
+      - name: Build natif win32-x64-msvc
+        working-directory: zcompiler/packages/zcompiler
+        run: pnpm exec zignapi build
+      - name: Smoke test (require + parse)
+        working-directory: zcompiler/packages/zcompiler
+        run: node -e "const z=require('./index.js'); const s=z.print('const x=1+1'); if(s!=='const x = 1 + 1;\n'){console.error('KO',JSON.stringify(s));process.exit(1)} console.log('✓ win32 native OK')"

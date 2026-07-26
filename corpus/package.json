@@ -1,0 +1,9 @@
+{
+  "name": "zparse-corpus",
+  "private": true,
+  "dependencies": {
+    "lodash-es": "^4.18.1",
+    "mitt": "^3.0.1",
+    "nanoid": "^6.0.0"
+  }
+}
