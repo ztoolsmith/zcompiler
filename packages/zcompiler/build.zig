@@ -70,7 +70,7 @@ fn linkNapiOnWindows(
 ) void {
     if (target.result.os.tag != .windows) return;
     const gen = b.addSystemCommand(&.{ b.graph.zig_exe, "lib", "-nologo" });
-    gen.addPrefixedFileArg("/def:", zignapi_dep.path("native/vendor/node_api.def"));
+    gen.addPrefixedFileArg("/def:", zignapi_dep.namedLazyPath("node_api_def"));
     const implib = gen.addPrefixedOutputFileArg("/out:", "node_api.lib");
     gen.addArg(if (target.result.cpu.arch == .aarch64) "/machine:arm64" else "/machine:x64");
     addon.root_module.addObjectFile(implib);
