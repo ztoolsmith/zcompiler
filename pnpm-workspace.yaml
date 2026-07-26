@@ -1,8 +1,3 @@
 packages:
   - "packages/*"
   - "playground"
-
-# esbuild a un script de build (lie son binaire de plateforme) ; on l'autorise
-# explicitement, sinon `pnpm install` sort en erreur (ERR_PNPM_IGNORED_BUILDS).
-onlyBuiltDependencies:
-  - esbuild

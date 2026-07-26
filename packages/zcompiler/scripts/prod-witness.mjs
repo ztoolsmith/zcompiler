@@ -1,16 +1,17 @@
 // Automated dress rehearsal for publishing: `npm pack` the main package + the
 // host's per-platform package into an EMPTY witness, then prove both backends
 // resolve and run through the published `exports` map:
-//   - Node condition  → index.js → bindings.js → the native platform package
-//   - browser (esbuild --bundle --platform=browser) → wasm.js (self-contained)
+//   - Node condition       → index.js → bindings.js → the native platform package
+//   - browser condition     → wasm.js (self-contained), via Node --conditions=browser
+//     (the same package-`exports` resolution a bundler applies — no bundler dep)
 // This is the "prod simulée" the release workflow runs before uploading artifacts.
 //
 // Run from the package dir (packages/zcompiler) AFTER `zignapi build` +
 // `zignapi build --target wasm` + `zignapi build --target <host-triple>`.
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import process from "node:process";
 
 const PKG = process.cwd();
@@ -70,27 +71,23 @@ const nodeOut = execFileSync(
 assert(nodeOut === EXPECT, `node/native print mismatch: ${JSON.stringify(nodeOut)}`);
 process.stdout.write("✔ node condition → native (index.js → bindings.js → platform pkg)\n");
 
-// 2. browser condition via a REAL bundler (esbuild) → wasm.js, then run it.
-const esbuild = await import("esbuild");
-const entry = join(witness, "entry.mjs");
-writeFileSync(entry, `import * as z from "zcompiler"; globalThis.__out = (z.default ?? z).print(${JSON.stringify(SRC)});`);
-const bundleFile = join(witness, "bundle.cjs");
-await esbuild.build({
-  entryPoints: [entry],
-  bundle: true,
-  platform: "browser",
-  conditions: ["browser"],
-  format: "cjs",
-  outfile: bundleFile,
-  absWorkingDir: witness,
-});
-const bundleOut = execFileSync(
+// 2. browser condition → wasm.js, resolved exactly like a bundler does. We use
+// Node's OWN `--conditions=browser` (the same package-`exports` condition
+// resolution esbuild/webpack/rollup apply) — dependency-free, so nothing to
+// build or approve in CI. It proves `exports["."].browser` → wasm.js and that
+// the self-contained wasm glue runs.
+const browserOut = execFileSync(
   process.execPath,
-  ["-e", `require(${JSON.stringify(bundleFile)}); process.stdout.write(globalThis.__out)`],
+  [
+    "--conditions=browser",
+    "--input-type=module",
+    "-e",
+    `import * as z from "zcompiler"; process.stdout.write((z.default ?? z).print(${JSON.stringify(SRC)}));`,
+  ],
   { cwd: witness, encoding: "utf8" },
 );
-assert(bundleOut === EXPECT, `esbuild/browser/wasm print mismatch: ${JSON.stringify(bundleOut)}`);
-process.stdout.write("✔ browser condition (esbuild --platform=browser) → wasm.js, runs\n");
+assert(browserOut === EXPECT, `browser/wasm print mismatch: ${JSON.stringify(browserOut)}`);
+process.stdout.write("✔ browser condition (--conditions=browser) → wasm.js, runs\n");
 
 rmSync(witness, { recursive: true, force: true });
 process.stdout.write("✔ prod witness: both backends resolve + run through the exports map\n");

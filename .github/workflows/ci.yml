@@ -112,9 +112,10 @@ jobs:
           done
           echo "✓ 5 triples cross-compilés"
 
-      # Bundler-witness (esbuild) : npm pack → témoin vide → les conditions d'exports
-      # résolvent bien node→natif et browser→wasm.js, et les deux tournent.
-      - name: Bundler-witness (esbuild) + prod simulée
+      # Bundler-witness : npm pack → témoin vide → les conditions d'exports
+      # résolvent bien node→natif et browser→wasm.js (via Node --conditions,
+      # la même résolution qu'un bundler), et les deux tournent.
+      - name: Bundler-witness (conditions Node) + prod simulée
         working-directory: zcompiler/packages/zcompiler
         run: |
           pnpm exec zignapi prepublish
