@@ -1262,6 +1262,26 @@ pub fn print(node: *const Node, source: []const u8, out: *std.ArrayList(u8), gpa
     for (prog.body) |stmt| try p.stmtAt(stmt);
 }
 
+/// Imprime UN statement (indenté, terminé par un saut de ligne).
+///
+/// Ajouté en 0.3.0 pour les consommateurs qui recomposent un programme au lieu
+/// de le réémettre tel quel — un bundler concatène des modules en choisissant
+/// statement par statement ce qu'il garde (les `import` disparaissent, les
+/// `export const x` perdent leur `export`…). Sans ça il faudrait fabriquer un
+/// faux `program` par statement.
+pub fn printStatement(node: *const Node, source: []const u8, out: *std.ArrayList(u8), gpa: std.mem.Allocator) Printer.Error!void {
+    var p = Printer{ .source = source, .out = out, .gpa = gpa };
+    try p.stmtAt(node);
+}
+
+/// Imprime UNE expression (sans indentation ni `;`), parenthésée si sa
+/// précédence l'exige au niveau assignation. Le pendant de `printStatement`
+/// pour, par exemple, lier un `export default <expression>` à un nom fabriqué.
+pub fn printExpression(node: *const Node, source: []const u8, out: *std.ArrayList(u8), gpa: std.mem.Allocator) Printer.Error!void {
+    var p = Printer{ .source = source, .out = out, .gpa = gpa };
+    try p.expr(node, PREC_ASSIGN);
+}
+
 // ------------------------------------------------------------------ tests
 
 const parser = @import("parser.zig");

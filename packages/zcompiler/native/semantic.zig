@@ -33,6 +33,12 @@ pub const Binding = struct {
     references: std.ArrayList(Reference) = .empty,
     /// Nouveau nom posé par le mangler (null = garder le nom d'origine).
     new_name: ?[]const u8 = null,
+    /// Le binding est-il RÉASSIGNÉ quelque part (`x = …`, `x++`, `x += …`) ?
+    /// Distinct de « référencé » : c'est une ÉCRITURE. Un bundler en a besoin
+    /// pour repérer les **live bindings** (`export let x` muté après coup) —
+    /// un export mutable ne survit pas au scope hoisting, il faut savoir le
+    /// refuser plutôt que d'émettre un bundle faux.
+    assigned: bool = false,
 
     /// Nom courant : renommé s'il l'a été, sinon le nom d'origine.
     pub fn currentName(self: *const Binding) []const u8 {
@@ -89,6 +95,11 @@ pub const Semantic = struct {
     // État de construction :
     current: u32 = 0,
     non_ref: std.AutoHashMapUnmanaged(*const Node, void) = .empty,
+    /// `class_body` d'une **expression de classe nommée** -> son nœud identifiant.
+    /// Rempli à l'entrée de la `class_expression`, consommé à l'entrée de son
+    /// `class_body` (le walker garantit cet ordre). Cf. `declareBinding` du
+    /// scope de classe.
+    class_names: std.AutoHashMapUnmanaged(*const Node, *const Node) = .empty,
 
     fn scopeAt(self: *Semantic, id: u32) *Scope {
         return self.scopes.items[id];
@@ -294,6 +305,7 @@ pub const Semantic = struct {
         var sid: ?u32 = self.current;
         while (sid) |id| {
             if (self.scopeAt(id).bindings.get(name)) |b| {
+                b.assigned = true; // écriture : cf. `Binding.assigned`
                 if (b.kind == .const_) self.diag("assignment to constant '{s}'", .{name});
                 return;
             }
@@ -341,7 +353,15 @@ pub const Semantic = struct {
                 .switch_statement => |s| for (s.cases) |c| self.declareDirectLexical(self.current, c.kind.switch_case.consequent),
                 .for_statement, .for_of_statement, .for_in_statement => self.declareForScope(node),
                 .catch_clause => |c| if (c.param) |p| self.declarePattern(self.current, p, .param),
-                else => {}, // class_body : juste un scope
+                // `const C = class Bar { m() { return Bar; } }` : le nom d'une
+                // EXPRESSION de classe est lié dans le corps de la classe, et
+                // nulle part ailleurs (`Bar` n'existe pas à l'extérieur). Miroir
+                // exact de ce que `declareFunctionScope` fait déjà pour
+                // `const f = function foo() { return foo; }`.
+                .class_body => if (self.class_names.get(node)) |id| {
+                    self.declareBinding(self.current, id, .class_);
+                },
+                else => {},
             }
         }
         // 2) Marquages non-référence + résolution (indépendants du scope).
@@ -376,6 +396,14 @@ pub const Semantic = struct {
             // module, pas une référence. (Le namespace n'est jamais visible
             // dans le corps du module : `export * as ns` ≠ `import * as ns`.)
             .export_all_declaration => |e| if (e.exported) |ns| self.markNonRef(ns),
+            // Expression de classe nommée : le nom n'est pas une référence, et
+            // il sera déclaré dans le scope du corps (cf. `.class_body` plus haut).
+            // L'`enter` de la classe précède celui de son corps : la note est lue
+            // juste après avoir été posée.
+            .class_expression => |c| if (c.id) |id| {
+                self.class_names.put(self.arena, c.body, id) catch {};
+                self.markNonRef(id);
+            },
             // Les clés d'attribut (`with { type: 'json' }`) sont des noms de
             // propriété, pas des références — comme une clé d'objet.
             .import_attribute => |a| self.markNonRef(a.key),
@@ -717,6 +745,261 @@ fn appendCodepoint(arena: std.mem.Allocator, out: *std.ArrayList(u8), cp: u21) v
     out.appendSlice(arena, buf[0..n]) catch {};
 }
 
+// ---- module info : la table des imports/exports (ce qu'un LINKER doit savoir) ----
+//
+// Ajouté pour zbundle v0.2 (2026-07-26). `moduleRecords` répond « de quoi ce
+// fichier dépend-il ? » — assez pour tracer un graphe. Lier, c'est une autre
+// question : « quel BINDING se cache derrière chaque nom importé/exporté ? ».
+//
+// Équivalent du `ModuleRecord` d'oxc / du `Module` de rollup. Reste une passe
+// d'ANALYSE en lecture seule (ast + walker), d'où sa place ici.
+
+pub const ImportKind = enum {
+    /// `import d from './m'`
+    default,
+    /// `import { a as b } from './m'`
+    named,
+    /// `import * as ns from './m'`
+    namespace,
+};
+
+/// Un nom LIÉ localement par un import. `binding` est le binding du scope module
+/// (celui qu'on renommera) ; `imported` est le nom vu chez la source.
+pub const ImportEntry = struct {
+    local: []const u8,
+    binding: ?*Binding,
+    specifier: []const u8,
+    kind: ImportKind,
+    /// `.named` seulement (vide pour default/namespace).
+    imported: []const u8 = "",
+};
+
+pub const ExportKind = enum {
+    /// `export const x` / `export { x }` / `export default x` : un binding LOCAL.
+    local,
+    /// `export default <expression>` : aucun binding, il faut en fabriquer un.
+    default_expr,
+    /// `export { a as b } from './m'` : indirect — suivre la chaîne chez la source.
+    re_export,
+    /// `export * as ns from './m'` : le namespace de la source, sous un nom.
+    star_as,
+};
+
+/// Un nom vu de l'EXTÉRIEUR du module. `exported` vaut `"default"` pour un
+/// export par défaut (c'est un nom d'export comme un autre).
+pub const ExportEntry = struct {
+    exported: []const u8,
+    kind: ExportKind,
+    /// `.local` : le binding exporté.
+    binding: ?*Binding = null,
+    /// `.default_expr` : l'expression à lier à un nom fabriqué.
+    value: ?*Node = null,
+    /// `.re_export` / `.star_as` : la source et le nom importé chez elle.
+    specifier: []const u8 = "",
+    imported: []const u8 = "",
+};
+
+/// Tout ce qu'un linker doit savoir d'un module, en une passe.
+pub const ModuleInfo = struct {
+    imports: []const ImportEntry,
+    exports: []const ExportEntry,
+    /// `export * from './m'` : les specifiers dont les noms sont re-exportés en
+    /// bloc (à résoudre chez la source — ils ne sont pas énumérables ici).
+    star_exports: []const []const u8,
+    /// Le scope module : tous les bindings top-level, la matière du renommage.
+    module_scope: *Scope,
+    /// `await` en dehors de toute fonction. Un bundler à scope hoisting ne peut
+    /// pas concaténer ça dans un module qui ne l'attend pas.
+    has_top_level_await: bool = false,
+    /// `import.meta` : dépend de l'URL du module, qui n'existe plus après fusion.
+    has_import_meta: bool = false,
+};
+
+const InfoCollector = struct {
+    arena: std.mem.Allocator,
+    sem: *Semantic,
+    src: []const u8,
+    fn_depth: u32 = 0,
+    tla: bool = false,
+    meta: bool = false,
+
+    fn enter(self: *InfoCollector, node: *Node) ?*Node {
+        switch (node.kind) {
+            .function_declaration, .function_expression, .arrow_function, .method_definition => self.fn_depth += 1,
+            .await_expression => if (self.fn_depth == 0) {
+                self.tla = true;
+            },
+            .meta_property => self.meta = true,
+            else => {},
+        }
+        return null;
+    }
+    fn exit(self: *InfoCollector, node: *Node) ?*Node {
+        switch (node.kind) {
+            .function_declaration, .function_expression, .arrow_function, .method_definition => self.fn_depth -= 1,
+            else => {},
+        }
+        return null;
+    }
+};
+
+fn infoEnterThunk(ctx: *anyopaque, node: *Node) ?*Node {
+    const c: *InfoCollector = @ptrCast(@alignCast(ctx));
+    return c.enter(node);
+}
+fn infoExitThunk(ctx: *anyopaque, node: *Node) ?*Node {
+    const c: *InfoCollector = @ptrCast(@alignCast(ctx));
+    return c.exit(node);
+}
+
+/// Les imports/exports de `program`, dans l'ordre du source. `sem` doit être
+/// l'analyse DE CE program (les bindings renvoyés en viennent).
+///
+/// Ne regarde que le TOP-LEVEL pour les déclarations de module (c'est la seule
+/// place légale) ; le walk complet ne sert qu'à repérer `await` top-level et
+/// `import.meta`, où qu'ils soient.
+pub fn moduleInfo(arena: std.mem.Allocator, program: *Node, source: []const u8, sem: *Semantic) ModuleInfo {
+    var imports: std.ArrayList(ImportEntry) = .empty;
+    var exports: std.ArrayList(ExportEntry) = .empty;
+    var stars: std.ArrayList([]const u8) = .empty;
+    const scope = sem.scopes.items[0]; // scope 0 = module (créé sur `.program`)
+
+    const bindingOf = struct {
+        fn get(s: *Scope, name: []const u8) ?*Binding {
+            return s.bindings.get(name);
+        }
+    }.get;
+
+    for (program.kind.program.body) |stmt| switch (stmt.kind) {
+        .import_declaration => |d| {
+            if (d.type_only) continue; // effacé à l'émission : rien à lier
+            const spec = specifierText(arena, d.source, source);
+            for (d.specifiers) |s| switch (s.kind) {
+                .import_default_specifier => |x| imports.append(arena, .{
+                    .local = x.local.litText(source),
+                    .binding = bindingOf(scope, x.local.litText(source)),
+                    .specifier = spec,
+                    .kind = .default,
+                }) catch {},
+                .import_namespace_specifier => |x| imports.append(arena, .{
+                    .local = x.local.litText(source),
+                    .binding = bindingOf(scope, x.local.litText(source)),
+                    .specifier = spec,
+                    .kind = .namespace,
+                }) catch {},
+                .import_specifier => |x| if (!x.type_only) imports.append(arena, .{
+                    .local = x.local.litText(source),
+                    .binding = bindingOf(scope, x.local.litText(source)),
+                    .specifier = spec,
+                    .kind = .named,
+                    .imported = x.imported.litText(source),
+                }) catch {},
+                else => {},
+            };
+        },
+        .export_named_declaration => |d| {
+            if (d.type_only) continue;
+            if (d.declaration) |decl| {
+                // `export const x = …` / `export function f(){}` / `export class C{}`
+                for (declaredNames(arena, decl, source)) |name| exports.append(arena, .{
+                    .exported = name,
+                    .kind = .local,
+                    .binding = bindingOf(scope, name),
+                }) catch {};
+                continue;
+            }
+            const spec: ?[]const u8 = if (d.source) |s| specifierText(arena, s, source) else null;
+            for (d.specifiers) |s| {
+                const es = s.kind.export_specifier;
+                if (es.type_only) continue;
+                const local = es.local.litText(source);
+                const exported = es.exported.litText(source);
+                if (spec) |sp| {
+                    exports.append(arena, .{ .exported = exported, .kind = .re_export, .specifier = sp, .imported = local }) catch {};
+                } else {
+                    exports.append(arena, .{ .exported = exported, .kind = .local, .binding = bindingOf(scope, local) }) catch {};
+                }
+            }
+        },
+        .export_default_declaration => |d| {
+            // `export default foo;` où `foo` est un binding du module = un export
+            // local, pas une expression à matérialiser (évite un `const x = x`).
+            if (d.declaration.kind == .identifier) {
+                if (bindingOf(scope, d.declaration.litText(source))) |b| {
+                    exports.append(arena, .{ .exported = "default", .kind = .local, .binding = b }) catch {};
+                    continue;
+                }
+            }
+            exports.append(arena, .{ .exported = "default", .kind = .default_expr, .value = d.declaration }) catch {};
+        },
+        .export_all_declaration => |d| {
+            const spec = specifierText(arena, d.source, source);
+            if (d.exported) |ns| {
+                exports.append(arena, .{
+                    .exported = ns.litText(source),
+                    .kind = .star_as,
+                    .specifier = spec,
+                }) catch {};
+            } else stars.append(arena, spec) catch {};
+        },
+        else => {},
+    };
+
+    var c = InfoCollector{ .arena = arena, .sem = sem, .src = source };
+    _ = walker.walk(program, .{ .ctx = &c, .enter = infoEnterThunk, .exit = infoExitThunk });
+
+    return .{
+        .imports = imports.items,
+        .exports = exports.items,
+        .star_exports = stars.items,
+        .module_scope = scope,
+        .has_top_level_await = c.tla,
+        .has_import_meta = c.meta,
+    };
+}
+
+/// Le specifier décodé d'un nœud source (guillemets retirés, échappements résolus).
+fn specifierText(arena: std.mem.Allocator, node: *Node, source: []const u8) []const u8 {
+    if (node.kind != .string_literal) return "";
+    return decodeStringLiteral(arena, node.litText(source));
+}
+
+/// Les noms liés par une déclaration exportée (`export const {a, b} = o` en lie
+/// deux). Réutilise la logique de patterns du semantic, en lecture seule.
+fn declaredNames(arena: std.mem.Allocator, decl: *Node, source: []const u8) []const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    switch (decl.kind) {
+        .variable_declaration => |d| for (d.declarations) |v| {
+            collectPatternNames(arena, v.kind.variable_declarator.id, source, &out);
+        },
+        .function_declaration => |f| if (f.id) |id| out.append(arena, id.litText(source)) catch {},
+        .class_declaration => |c| if (c.id) |id| out.append(arena, id.litText(source)) catch {},
+        // TS : `export enum E` / `export namespace N` déclarent aussi un binding.
+        .ts_enum => |e| out.append(arena, e.id.litText(source)) catch {},
+        .ts_namespace => |n| out.append(arena, n.id.litText(source)) catch {},
+        else => {},
+    }
+    return out.items;
+}
+
+fn collectPatternNames(arena: std.mem.Allocator, node: *Node, source: []const u8, out: *std.ArrayList([]const u8)) void {
+    switch (node.kind) {
+        .identifier => out.append(arena, node.litText(source)) catch {},
+        .array_pattern => |a| for (a.elements) |el| {
+            if (el) |e| collectPatternNames(arena, e, source, out);
+        },
+        .object_pattern => |o| for (o.properties) |p| switch (p.kind) {
+            .rest_element => |r| collectPatternNames(arena, r.argument, source, out),
+            .property => |pr| collectPatternNames(arena, pr.value, source, out),
+            else => {},
+        },
+        .assignment_pattern => |a| collectPatternNames(arena, a.left, source, out),
+        .rest_element => |r| collectPatternNames(arena, r.argument, source, out),
+        .ts_typed => |t| collectPatternNames(arena, t.binding, source, out),
+        else => {},
+    }
+}
+
 // ------------------------------------------------------------------ tests
 
 const parser = @import("parser.zig");
@@ -1042,4 +1325,182 @@ test "moduleRecords : import(src, options) reste un dynamic_import sans attribut
     // Les options d'un import() sont une EXPRESSION quelconque : on ne devine
     // rien (l'AST porte `ImportExpression.options` pour qui veut l'analyser).
     try std.testing.expectEqual(@as(usize, 0), r.items[0].attributes.len);
+}
+
+// ---- module info ----
+
+const Info = struct {
+    arena: std.heap.ArenaAllocator,
+    info: ModuleInfo,
+    fn deinit(self: *Info) void {
+        self.arena.deinit();
+    }
+    fn exportNamed(self: *Info, name: []const u8) ?ExportEntry {
+        for (self.info.exports) |e| if (std.mem.eql(u8, e.exported, name)) return e;
+        return null;
+    }
+    fn importLocal(self: *Info, name: []const u8) ?ImportEntry {
+        for (self.info.imports) |i| if (std.mem.eql(u8, i.local, name)) return i;
+        return null;
+    }
+};
+
+fn moduleInfoOf(gpa: std.mem.Allocator, src: []const u8, ts: bool) !Info {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    const a = arena.allocator();
+    const program = (try parser.parseWith(a, src, false, ts)).program;
+    const sem = analyze(a, program, src);
+    // En deux temps : `.arena = arena` copierait l'arène AVANT que `moduleInfo`
+    // n'alloue dedans (cf. la note du helper `records`).
+    const info = moduleInfo(a, program, src, sem);
+    return .{ .arena = arena, .info = info };
+}
+
+test "moduleInfo : les trois formes d'import, avec leur binding" {
+    var i = try moduleInfoOf(std.testing.allocator,
+        \\import def from './a';
+        \\import * as ns from './b';
+        \\import { x, y as z } from './c';
+    , false);
+    defer i.deinit();
+    try std.testing.expectEqual(@as(usize, 4), i.info.imports.len);
+
+    const d = i.importLocal("def").?;
+    try std.testing.expectEqual(ImportKind.default, d.kind);
+    try std.testing.expectEqualStrings("./a", d.specifier);
+    try std.testing.expect(d.binding != null); // renommable
+
+    try std.testing.expectEqual(ImportKind.namespace, i.importLocal("ns").?.kind);
+
+    const z = i.importLocal("z").?;
+    try std.testing.expectEqual(ImportKind.named, z.kind);
+    try std.testing.expectEqualStrings("y", z.imported); // le nom CHEZ LA SOURCE
+    try std.testing.expectEqualStrings("./c", z.specifier);
+}
+
+test "moduleInfo : exports locaux (const, function, class, destructuring)" {
+    var i = try moduleInfoOf(std.testing.allocator,
+        \\export const a = 1;
+        \\export function f() {}
+        \\export class C {}
+        \\export const { x, y: [z] } = o;
+        \\const hidden = 2;
+        \\export { hidden as pub };
+    , false);
+    defer i.deinit();
+    for ([_][]const u8{ "a", "f", "C", "x", "z", "pub" }) |name| {
+        const e = i.exportNamed(name) orelse {
+            std.debug.print("export manquant: {s}\n", .{name});
+            return error.MissingExport;
+        };
+        try std.testing.expectEqual(ExportKind.local, e.kind);
+        try std.testing.expect(e.binding != null);
+    }
+    // `pub` pointe sur le binding `hidden` (le nom LOCAL, pas le nom public).
+    try std.testing.expectEqualStrings("hidden", i.exportNamed("pub").?.binding.?.name);
+}
+
+test "moduleInfo : export default — binding existant vs expression" {
+    // `export default foo` où foo est un binding -> local (pas de const inutile).
+    {
+        var i = try moduleInfoOf(std.testing.allocator, "const foo = 1; export default foo;", false);
+        defer i.deinit();
+        const e = i.exportNamed("default").?;
+        try std.testing.expectEqual(ExportKind.local, e.kind);
+        try std.testing.expectEqualStrings("foo", e.binding.?.name);
+    }
+    // Une expression -> il faudra lui fabriquer un nom.
+    {
+        var i = try moduleInfoOf(std.testing.allocator, "export default function () { return 1; };", false);
+        defer i.deinit();
+        const e = i.exportNamed("default").?;
+        try std.testing.expectEqual(ExportKind.default_expr, e.kind);
+        try std.testing.expect(e.value != null);
+    }
+}
+
+test "moduleInfo : re-export, export * et export * as ns" {
+    var i = try moduleInfoOf(std.testing.allocator,
+        \\export { a, b as c } from './m';
+        \\export * from './n';
+        \\export * as ns from './o';
+    , false);
+    defer i.deinit();
+    const c = i.exportNamed("c").?;
+    try std.testing.expectEqual(ExportKind.re_export, c.kind);
+    try std.testing.expectEqualStrings("./m", c.specifier);
+    try std.testing.expectEqualStrings("b", c.imported); // le nom chez la source
+
+    const ns = i.exportNamed("ns").?;
+    try std.testing.expectEqual(ExportKind.star_as, ns.kind);
+    try std.testing.expectEqualStrings("./o", ns.specifier);
+
+    try std.testing.expectEqual(@as(usize, 1), i.info.star_exports.len);
+    try std.testing.expectEqualStrings("./n", i.info.star_exports[0]);
+}
+
+test "moduleInfo : top-level await détecté, pas celui dans une fonction" {
+    {
+        var i = try moduleInfoOf(std.testing.allocator, "const x = await fetch('/');", false);
+        defer i.deinit();
+        try std.testing.expect(i.info.has_top_level_await);
+    }
+    {
+        var i = try moduleInfoOf(std.testing.allocator, "async function f() { return await g(); }", false);
+        defer i.deinit();
+        try std.testing.expect(!i.info.has_top_level_await);
+    }
+}
+
+test "moduleInfo : import.meta détecté" {
+    var i = try moduleInfoOf(std.testing.allocator, "const u = import.meta.url;", false);
+    defer i.deinit();
+    try std.testing.expect(i.info.has_import_meta);
+}
+
+test "moduleInfo : `import type` n'entre pas dans la table de liaison" {
+    var i = try moduleInfoOf(std.testing.allocator, "import type { T } from './t'; import { v } from './v';", true);
+    defer i.deinit();
+    try std.testing.expectEqual(@as(usize, 1), i.info.imports.len);
+    try std.testing.expectEqualStrings("v", i.info.imports[0].local);
+}
+
+test "Binding.assigned : distingue la lecture de l'ÉCRITURE (live bindings)" {
+    var p = try probe(std.testing.allocator, "export let mutable = 1; export const stable = 2; mutable = 3; stable;");
+    defer p.deinit();
+    const scope = p.sem.scopes.items[0];
+    try std.testing.expect(scope.bindings.get("mutable").?.assigned);
+    // `stable` est LU, jamais écrit.
+    try std.testing.expect(!scope.bindings.get("stable").?.assigned);
+}
+
+test "Binding.assigned : ++ et += comptent comme des écritures" {
+    var p = try probe(std.testing.allocator, "let a = 0; let b = 0; let c = 0; a++; b += 1; c;");
+    defer p.deinit();
+    const scope = p.sem.scopes.items[0];
+    try std.testing.expect(scope.bindings.get("a").?.assigned);
+    try std.testing.expect(scope.bindings.get("b").?.assigned);
+    try std.testing.expect(!scope.bindings.get("c").?.assigned);
+}
+
+test "expression de classe nommée : le nom est lié DANS le corps, nulle part ailleurs" {
+    // Miroir de `const f = function foo() { return foo; }` (déjà géré).
+    {
+        var p = try probe(std.testing.allocator, "const C = class Bar { m() { return Bar; } };");
+        defer p.deinit();
+        try std.testing.expect(!p.unresolved("Bar"));
+        try std.testing.expectEqual(@as(usize, 1), p.totalRefs("Bar"));
+    }
+    // Mais PAS visible à l'extérieur : `Bar` n'existe que dans la classe.
+    {
+        var p = try probe(std.testing.allocator, "const C = class Bar {}; Bar;");
+        defer p.deinit();
+        try std.testing.expect(p.unresolved("Bar"));
+    }
+    // Une DÉCLARATION de classe garde son comportement (nom visible dehors).
+    {
+        var p = try probe(std.testing.allocator, "class Baz { m() { return Baz; } } Baz;");
+        defer p.deinit();
+        try std.testing.expect(!p.unresolved("Baz"));
+    }
 }

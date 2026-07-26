@@ -4,6 +4,62 @@ Toutes les modifications notables de zcompiler. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; versionnage
 [SemVer](https://semver.org/lang/fr/).
 
+## [0.3.0] — 2026-07-26
+
+La release **« le compilateur au service d'un linker »**. zbundle v0.2 fusionne
+N modules dans un seul scope ; pour ça il lui faut savoir, de chaque module, quel
+BINDING se cache derrière chaque nom importé/exporté, puis pouvoir **imposer sa
+propre table de noms**. Rien de tout ça n'a été écrit chez le consommateur.
+
+### Ajouté
+
+- **`semantic.moduleInfo(arena, program, source, sem)`** — la table de liaison
+  d'un module : `imports` (`{ local, binding, specifier, kind, imported }`),
+  `exports` (`{ exported, kind, binding | value, specifier, imported }`),
+  `star_exports`, le scope module, et deux drapeaux (`has_top_level_await`,
+  `has_import_meta`). Équivalent du `ModuleRecord` d'oxc.
+  `moduleRecords` répondait « **de quoi ce fichier dépend-il ?** » — assez pour
+  tracer un graphe. `moduleInfo` répond « **qu'est-ce qui est lié à quoi ?** » —
+  ce qu'il faut pour lier. Les deux coexistent : la première est bien plus légère.
+  `export default <identifiant lié>` est classé `.local` (pas `.default_expr`) :
+  un consommateur n'a pas à fabriquer un `const x = x` inutile.
+- **`mangler.applyRenames(sem)`** — extrait du corps de `mangle`. Écrit sur l'AST
+  les noms posés dans `binding.new_name` (déclarations ET références, via
+  `node_binding`). La **génération** des noms reste au mangler ; l'**application**
+  est désormais partagée, donc un consommateur peut poser sa propre table — par
+  exemple un bundler qui résout des collisions cross-module. Idempotent.
+- **`printer.printStatement`** / **`printer.printExpression`** — imprimer UN
+  nœud, pas un programme entier. Nécessaire à qui **recompose** un programme :
+  un bundler choisit statement par statement ce qu'il garde (les `import`
+  disparaissent, `export const x` perd son mot-clé, `export default <expr>` se
+  lie à un nom fabriqué).
+- **`Binding.assigned`** — le binding est-il **réassigné** quelque part
+  (`x = …`, `x++`, `x += …`) ? Distinct de « référencé » : c'est une ÉCRITURE.
+  Renseigné par le chemin qui vérifiait déjà les `const`. Sert à repérer les
+  **live bindings**.
+
+### Corrigé
+
+- **Le nom d'une expression de classe nommée n'était lié nulle part.** Dans
+  `const C = class Bar { m() { return Bar; } }`, `Bar` partait en `unresolved` —
+  alors que l'équivalent pour les fonctions (`const f = function foo() { … foo … }`)
+  était géré depuis toujours. Désormais le nom est déclaré **dans le corps de la
+  classe**, et nulle part ailleurs (`Bar` reste `unresolved` à l'extérieur, ce
+  qui est correct). Trouvé par zbundle, dont le contrôle « aucun nom interne ne
+  fuit » signalait un faux positif sur du code parfaitement sain.
+
+### Compatibilité
+
+Aucune rupture : que des ajouts. `mangle` se comporte exactement comme avant
+(il appelle simplement la fonction extraite). Le seul changement observable est
+la correction ci-dessus — un `unresolved` de moins, jamais un de plus.
+
+**Vérifications** : 213 tests Zig, 79 tests Node, corpus **683/683** sur les 5
+modes, recovery 22/22, ts-strip 26/26, tsx 8/8, jsx-transform 13/13, snapshot API
+natif vs wasm byte-identique. Et, côté consommateur, le juge de zbundle : **12/12
+bundles qui s'exécutent et disent exactement ce que dit le projet d'origine**,
+lodash-es (172 modules) inclus.
+
 ## [0.2.0] — 2026-07-26
 
 La release du **premier retour de la règle d'or** : zbundle, le premier
@@ -108,5 +164,6 @@ enum / parameter properties / namespace).
 Deux backends, une vérité : natif (N-API via zignapi) et **wasm**, dont le
 snapshot API est byte-identique. 6 triples publiés.
 
+[0.3.0]: https://github.com/ztoolsmith/zcompiler/releases/tag/v0.3.0
 [0.2.0]: https://github.com/ztoolsmith/zcompiler/releases/tag/v0.2.0
 [0.1.0]: https://github.com/ztoolsmith/zcompiler/releases/tag/v0.1.0

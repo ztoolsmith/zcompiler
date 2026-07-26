@@ -13,15 +13,15 @@ packages:
 # (pour l'install juste après la publication). On purge l'ancienne au cycle
 # suivant, une fois le lockfile à jour.
 minimumReleaseAgeExclude:
-  - '@zcompiler/binding-darwin-arm64@0.1.0'
-  - '@zcompiler/binding-darwin-x64@0.1.0'
-  - '@zcompiler/binding-linux-arm64-gnu@0.1.0'
-  - '@zcompiler/binding-linux-x64-gnu@0.1.0'
-  - '@zcompiler/binding-linux-x64-musl@0.1.0'
-  - '@zcompiler/binding-win32-x64-msvc@0.1.0'
   - '@zcompiler/binding-darwin-arm64@0.2.0'
   - '@zcompiler/binding-darwin-x64@0.2.0'
   - '@zcompiler/binding-linux-arm64-gnu@0.2.0'
   - '@zcompiler/binding-linux-x64-gnu@0.2.0'
   - '@zcompiler/binding-linux-x64-musl@0.2.0'
   - '@zcompiler/binding-win32-x64-msvc@0.2.0'
+  - '@zcompiler/binding-darwin-arm64@0.3.0'
+  - '@zcompiler/binding-darwin-x64@0.3.0'
+  - '@zcompiler/binding-linux-arm64-gnu@0.3.0'
+  - '@zcompiler/binding-linux-x64-gnu@0.3.0'
+  - '@zcompiler/binding-linux-x64-musl@0.3.0'
+  - '@zcompiler/binding-win32-x64-msvc@0.3.0'

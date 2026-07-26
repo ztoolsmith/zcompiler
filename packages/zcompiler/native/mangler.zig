@@ -114,8 +114,22 @@ pub fn mangle(arena: std.mem.Allocator, program: *Node, source: []const u8) usiz
         }
     }
 
-    // Application : chaque nœud identifiant d'un binding renommé porte son
-    // `synthetic_text` (déclaration ET références, via `node_binding`).
+    applyRenames(sem);
+    return renamed;
+}
+
+/// Écrit sur l'AST les noms posés dans `binding.new_name` : chaque nœud
+/// identifiant d'un binding renommé (déclaration ET références, via
+/// `node_binding`) reçoit son `synthetic_text`, que le printer sert par `litText`.
+///
+/// **Extrait de `mangle` pour être appelable seul** (zcompiler 0.3.0) : un
+/// consommateur peut poser sa PROPRE table de noms — par exemple un bundler qui
+/// fusionne N modules dans un seul scope et doit résoudre les collisions
+/// cross-module — puis demander l'application. La génération des noms (le choix
+/// de `a`, `b`, `c`…) reste au mangler ; l'écriture est désormais partagée.
+///
+/// Idempotent : réappliquer avec les mêmes `new_name` ne change rien.
+pub fn applyRenames(sem: *semantic.Semantic) void {
     var nit = sem.node_binding.iterator();
     while (nit.next()) |entry| {
         if (entry.value_ptr.*.new_name) |nn| {
@@ -130,7 +144,6 @@ pub fn mangle(arena: std.mem.Allocator, program: *Node, source: []const u8) usiz
             }
         }
     }
-    return renamed;
 }
 
 // ------------------------------------------------------------------ tests

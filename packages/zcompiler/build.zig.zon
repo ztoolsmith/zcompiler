@@ -1,6 +1,6 @@
 .{
     .name = .zcompiler,
-    .version = "0.2.0",
+    .version = "0.3.0",
     // Renommé `.zparse` -> `.zcompiler` (2026-07-26) : le nom du paquet Zig était
     // resté à l'ancien nom du projet. Zig dérive une partie du fingerprint du nom,
     // d'où la nouvelle valeur (imposée par le compilateur).
