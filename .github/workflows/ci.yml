@@ -38,7 +38,7 @@ jobs:
           path: zignapi
 
       - name: Setup Zig ${{ env.ZIG_VERSION }}
-        uses: mlugg/setup-zig@v1 # cache Zig intégré ; ajuster la version d'action si besoin
+        uses: mlugg/setup-zig@v2 # cache Zig intégré ; runtime Node 24
         with:
           version: ${{ env.ZIG_VERSION }}
       - uses: pnpm/action-setup@v4
@@ -130,7 +130,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/zignapi
           path: zignapi
-      - uses: mlugg/setup-zig@v1
+      - uses: mlugg/setup-zig@v2
         with:
           version: ${{ env.ZIG_VERSION }}
       - uses: pnpm/action-setup@v4

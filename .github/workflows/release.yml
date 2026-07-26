@@ -32,7 +32,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/zignapi
           path: zignapi
-      - uses: mlugg/setup-zig@v1
+      - uses: mlugg/setup-zig@v2
         with: { version: "${{ env.ZIG_VERSION }}" }
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
@@ -70,7 +70,7 @@ jobs:
         with:
           repository: ${{ github.repository_owner }}/zignapi
           path: zignapi
-      - uses: mlugg/setup-zig@v1
+      - uses: mlugg/setup-zig@v2
         with: { version: "${{ env.ZIG_VERSION }}" }
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
