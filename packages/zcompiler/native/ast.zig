@@ -247,6 +247,7 @@ pub const Node = struct {
         import_specifier: ImportSpecifier,
         import_namespace_specifier: ImportNamespaceSpecifier,
         import_expression: ImportExpression,
+        import_attribute: ImportAttribute, // `type: 'json'` dans un `with { … }`
         export_named_declaration: ExportNamed,
         export_default_declaration: ExportDefault,
         export_all_declaration: ExportAll,
@@ -375,18 +376,47 @@ pub const Node = struct {
     pub const BreakContinue = struct { label: ?*Node };
     pub const Labeled = struct { label: *Node, body: *Node };
     pub const DoWhile = struct { body: *Node, @"test": *Node };
+    /// La clause `with { … }` d'une déclaration de module (ES2025). `entries` sont
+    /// des nœuds `import_attribute` ; `deprecated_assert` retient que la source
+    /// disait `assert { … }` (l'ancien mot-clé des import assertions, accepté en
+    /// lecture) pour le réémettre tel quel — un formateur ne réécrit pas la
+    /// syntaxe de l'utilisateur dans son dos.
+    pub const Attributes = struct { entries: []*Node = &.{}, deprecated_assert: bool = false };
+
     /// `type_only` : `import type { A } from …` (déclaration entière type-only, TS).
-    pub const ImportDeclaration = struct { specifiers: []*Node, source: *Node, type_only: bool = false };
+    /// `attributes` : `with { type: 'json' }` (ES2025 — cf. `ImportAttribute`).
+    pub const ImportDeclaration = struct {
+        specifiers: []*Node,
+        source: *Node,
+        type_only: bool = false,
+        attributes: Attributes = .{},
+    };
     pub const ImportDefaultSpecifier = struct { local: *Node };
     /// `import { a as b }` : `imported` = a, `local` = b (= a sans `as`). `type_only`
     /// : `import { type a, b }` (spécificateur type-only inline, TS — retiré par strip).
     pub const ImportSpecifier = struct { imported: *Node, local: *Node, type_only: bool = false };
     pub const ImportNamespaceSpecifier = struct { local: *Node };
-    pub const ImportExpression = struct { source: *Node };
+    /// `import(source)` ou `import(source, options)` (ES2025). `options` est une
+    /// **expression quelconque** (`{ with: { type: 'json' } }` typiquement) — la
+    /// grammaire ne la contraint pas, contrairement au `with { … }` statique.
+    pub const ImportExpression = struct { source: *Node, options: ?*Node = null };
+    /// Une entrée d'un `with { … }` : `type: 'json'`.
+    /// `key` = identifiant OU string literal ; `value` = string literal
+    /// **obligatoire** (la spec n'autorise aucune autre expression).
+    pub const ImportAttribute = struct { key: *Node, value: *Node };
     /// `type_only` : `export type { A }` (export type-only, TS — retiré par strip).
-    pub const ExportNamed = struct { declaration: ?*Node, specifiers: []*Node, source: ?*Node, type_only: bool = false };
+    pub const ExportNamed = struct {
+        declaration: ?*Node,
+        specifiers: []*Node,
+        source: ?*Node,
+        type_only: bool = false,
+        attributes: Attributes = .{},
+    };
     pub const ExportDefault = struct { declaration: *Node };
-    pub const ExportAll = struct { source: *Node };
+    /// `export * from './x'` (`exported` null) ou `export * as ns from './x'`
+    /// (ES2020) : `exported` = le nom d'export `ns`. Ce n'est PAS un binding
+    /// local — c'est un nom d'export, comme le `b` de `export { a as b }`.
+    pub const ExportAll = struct { source: *Node, exported: ?*Node = null, attributes: Attributes = .{} };
     /// `export { a as b }` : `local` = a, `exported` = b (= a sans `as`). `type_only`
     /// : `export { type a, b }` (spécificateur type-only inline, TS).
     pub const ExportSpecifier = struct { local: *Node, exported: *Node, type_only: bool = false };
@@ -890,6 +920,12 @@ fn writeNode(
             try line(out, gpa, depth, "ImportDeclaration");
             for (d.specifiers) |s| try writeNode(s, source, out, gpa, depth + 1);
             try writeNode(d.source, source, out, gpa, depth + 1); // StringLiteral
+            for (d.attributes.entries) |a| try writeNode(a, source, out, gpa, depth + 1);
+        },
+        .import_attribute => |a| {
+            try line(out, gpa, depth, "ImportAttribute");
+            try writeNode(a.key, source, out, gpa, depth + 1);
+            try writeNode(a.value, source, out, gpa, depth + 1);
         },
         .import_default_specifier => |s| {
             try line(out, gpa, depth, "ImportDefaultSpecifier");
@@ -907,12 +943,14 @@ fn writeNode(
         .import_expression => |e| {
             try line(out, gpa, depth, "ImportExpression");
             try writeNode(e.source, source, out, gpa, depth + 1);
+            if (e.options) |o| try writeNode(o, source, out, gpa, depth + 1);
         },
         .export_named_declaration => |d| {
             try line(out, gpa, depth, "ExportNamedDeclaration");
             if (d.declaration) |decl| try writeNode(decl, source, out, gpa, depth + 1);
             for (d.specifiers) |s| try writeNode(s, source, out, gpa, depth + 1);
             if (d.source) |src| try writeNode(src, source, out, gpa, depth + 1);
+            for (d.attributes.entries) |a| try writeNode(a, source, out, gpa, depth + 1);
         },
         .export_default_declaration => |d| {
             try line(out, gpa, depth, "ExportDefaultDeclaration");
@@ -920,7 +958,12 @@ fn writeNode(
         },
         .export_all_declaration => |d| {
             try line(out, gpa, depth, "ExportAllDeclaration");
+            // `export * as ns from` : le nom d'export AVANT la source, comme dans
+            // le source — le debug-tree doit distinguer les deux formes (c'est lui
+            // que compare le round-trip).
+            if (d.exported) |e| try writeNode(e, source, out, gpa, depth + 1);
             try writeNode(d.source, source, out, gpa, depth + 1);
+            for (d.attributes.entries) |a| try writeNode(a, source, out, gpa, depth + 1);
         },
         .export_specifier => |s| {
             try line(out, gpa, depth, "ExportSpecifier");

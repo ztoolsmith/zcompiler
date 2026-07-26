@@ -198,6 +198,7 @@ pub fn walkChildren(node: *Node, v: Visitor) void {
         .import_declaration => |*d| {
             walkSlice(d.specifiers, v);
             walkOne(&d.source, v);
+            walkSlice(d.attributes.entries, v);
         },
         .import_default_specifier => |*s| walkOne(&s.local, v),
         .import_namespace_specifier => |*s| walkOne(&s.local, v),
@@ -205,14 +206,26 @@ pub fn walkChildren(node: *Node, v: Visitor) void {
             walkOne(&s.imported, v);
             walkOne(&s.local, v);
         },
-        .import_expression => |*e| walkOne(&e.source, v),
+        .import_expression => |*e| {
+            walkOne(&e.source, v);
+            walkOpt(&e.options, v); // `import(src, { with: … })` : une expression
+        },
+        .import_attribute => |*a| {
+            walkOne(&a.key, v);
+            walkOne(&a.value, v);
+        },
         .export_named_declaration => |*e| {
             walkOpt(&e.declaration, v);
             walkSlice(e.specifiers, v);
             walkOpt(&e.source, v);
+            walkSlice(e.attributes.entries, v);
         },
         .export_default_declaration => |*e| walkOne(&e.declaration, v),
-        .export_all_declaration => |*e| walkOne(&e.source, v),
+        .export_all_declaration => |*e| {
+            walkOpt(&e.exported, v); // `export * as ns from` : le nom d'export
+            walkOne(&e.source, v);
+            walkSlice(e.attributes.entries, v);
+        },
         .export_specifier => |*s| {
             walkOne(&s.local, v);
             walkOne(&s.exported, v);

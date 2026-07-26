@@ -371,6 +371,14 @@ pub const Semantic = struct {
                 self.markNonRef(es.local);
                 self.markNonRef(es.exported);
             },
+            // `export * as ns from 'm'` : `ns` est un NOM D'EXPORT, exactement
+            // comme le `b` de `export { a as b }` — pas un binding local du
+            // module, pas une référence. (Le namespace n'est jamais visible
+            // dans le corps du module : `export * as ns` ≠ `import * as ns`.)
+            .export_all_declaration => |e| if (e.exported) |ns| self.markNonRef(ns),
+            // Les clés d'attribut (`with { type: 'json' }`) sont des noms de
+            // propriété, pas des références — comme une clé d'objet.
+            .import_attribute => |a| self.markNonRef(a.key),
             .function_declaration => |f| if (f.id) |id| self.markNonRef(id), // nom hoisté par l'englobant
             .class_declaration => |c| if (c.id) |id| self.markNonRef(id),
             .assignment_expression => |a| self.checkConstAssign(a.target),
@@ -483,6 +491,230 @@ pub fn stats(s: *Semantic) Stats {
         .unresolved = @intCast(s.unresolved.count()),
         .diagnostics = @intCast(s.diagnostics.items.len),
     };
+}
+
+// ---- module records (les dépendances de module d'un AST) ----
+//
+// Ajouté pour zbundle (2026-07-26) : un bundler a besoin de la liste des
+// specifiers d'un fichier SANS refaire un parcours d'AST chez lui. La règle de
+// l'org : ce que le compilateur sait faire vit DANS le compilateur.
+//
+// C'est une passe d'ANALYSE pure (lecture seule, ne dépend que d'`ast` +
+// `walker`), d'où sa place ici plutôt que dans le parser.
+
+pub const ModuleRecordKind = enum {
+    /// `import x from './m'` / `import './m'` (side-effect) / `import { a } from './m'`
+    import,
+    /// `export { a } from './m'` — un re-export EST une dépendance.
+    re_export,
+    /// `export * from './m'` — re-exporte les noms de la cible.
+    export_all,
+    /// `export * as ns from './m'` (ES2020) — **opération différente** de
+    /// `export_all` : ça ne re-exporte pas les noms de la cible, ça crée UN
+    /// export nommé (`name`) qui vaut l'objet namespace. Un kind à part pour
+    /// que le consommateur soit forcé de trancher (`switch` exhaustif).
+    export_all_as,
+    /// `import('./m')` avec un specifier littéral (statiquement analysable).
+    dynamic_import,
+};
+
+/// Une entrée de `with { type: 'json' }` : `key` et `value` **décodés**.
+pub const ImportAttribute = struct { key: []const u8, value: []const u8 };
+
+/// Une dépendance de module, dans l'ORDRE DU SOURCE.
+///
+/// `specifier` est **décodé** (guillemets retirés, échappements résolus) : c'est
+/// la chaîne telle que la verrait le runtime, prête à passer à un resolver.
+/// `start`/`end` = le span du littéral (guillemets INCLUS), pour un diagnostic.
+/// `type_only` = `import type …` / `export type …` (TS) : effacé à l'émission,
+/// donc **pas** une dépendance runtime — c'est à l'appelant de filtrer.
+/// `name` : le nom d'export d'un `export * as ns from` (null pour tout le reste).
+/// `attributes` : la clause `with { … }`, vide si absente. Renseignée pour les
+/// formes STATIQUES seulement — pour un `import(src, options)`, les options sont
+/// une expression quelconque que la grammaire ne contraint pas, donc rien n'est
+/// deviné ici (l'AST porte `ImportExpression.options` pour qui veut l'analyser).
+pub const ModuleRecord = struct {
+    specifier: []const u8,
+    kind: ModuleRecordKind,
+    start: u32,
+    end: u32,
+    type_only: bool = false,
+    name: ?[]const u8 = null,
+    attributes: []const ImportAttribute = &.{},
+};
+
+const RecordCollector = struct {
+    arena: std.mem.Allocator,
+    src: []const u8,
+    out: std.ArrayList(ModuleRecord) = .empty,
+
+    /// N'enregistre QUE les specifiers littéraux. Un `import(expr)` calculé ou
+    /// un nœud d'erreur (code cassé, error recovery) est ignoré en silence :
+    /// il n'y a rien à résoudre.
+    fn push(
+        self: *RecordCollector,
+        node: *Node,
+        kind: ModuleRecordKind,
+        type_only: bool,
+        name: ?*Node,
+        attrs: Node.Attributes,
+    ) void {
+        if (node.kind != .string_literal) return;
+        const raw = node.litText(self.src);
+        self.out.append(self.arena, .{
+            .specifier = decodeStringLiteral(self.arena, raw),
+            .kind = kind,
+            .start = node.start,
+            .end = node.end,
+            .type_only = type_only,
+            .name = if (name) |n| n.litText(self.src) else null,
+            .attributes = self.decodeAttributes(attrs),
+        }) catch {};
+    }
+
+    /// Les attributs, clés et valeurs décodées. Une clé identifiant se lit telle
+    /// quelle ; une clé string passe par le décodage (guillemets + échappements),
+    /// comme les valeurs — toujours des string literals par la grammaire.
+    fn decodeAttributes(self: *RecordCollector, attrs: Node.Attributes) []const ImportAttribute {
+        if (attrs.entries.len == 0) return &.{};
+        const out = self.arena.alloc(ImportAttribute, attrs.entries.len) catch return &.{};
+        for (attrs.entries, out) |entry, *slot| {
+            const a = entry.kind.import_attribute;
+            const key = a.key.litText(self.src);
+            slot.* = .{
+                .key = if (a.key.kind == .string_literal) decodeStringLiteral(self.arena, key) else key,
+                .value = decodeStringLiteral(self.arena, a.value.litText(self.src)),
+            };
+        }
+        return out;
+    }
+
+    fn enter(self: *RecordCollector, node: *Node) ?*Node {
+        switch (node.kind) {
+            .import_declaration => |d| self.push(d.source, .import, d.type_only, null, d.attributes),
+            .export_all_declaration => |d| self.push(
+                d.source,
+                if (d.exported != null) .export_all_as else .export_all,
+                false,
+                d.exported,
+                d.attributes,
+            ),
+            .export_named_declaration => |d| if (d.source) |s| self.push(s, .re_export, d.type_only, null, d.attributes),
+            // `import(src, options)` : les options sont une expression quelconque
+            // (pas la grammaire statique des attributs) — on ne devine rien.
+            .import_expression => |e| self.push(e.source, .dynamic_import, false, null, .{}),
+            else => {},
+        }
+        return null; // jamais de substitution : passe en lecture seule.
+    }
+};
+
+fn recordsEnterThunk(ctx: *anyopaque, node: *Node) ?*Node {
+    const c: *RecordCollector = @ptrCast(@alignCast(ctx));
+    return c.enter(node);
+}
+
+/// Les dépendances de module de `program`, dans l'ordre du source.
+///
+/// Couvre : `import`, `export … from`, `export * from`, `import()` littéral.
+/// Ne couvre PAS (assumé, documenté) : `require()` (CJS — zcompiler est ESM),
+/// `import(expr)` calculé (rien à résoudre statiquement), les import attributes
+/// (`with { type: 'json' }` — pas encore dans la grammaire).
+///
+/// Tout est alloué dans `arena` ; les specifiers SANS échappement pointent
+/// directement dans `source` (zéro copie).
+pub fn moduleRecords(arena: std.mem.Allocator, program: *Node, source: []const u8) []const ModuleRecord {
+    var c = RecordCollector{ .arena = arena, .src = source };
+    const v = walker.Visitor{ .ctx = &c, .enter = recordsEnterThunk };
+    _ = walker.walk(program, v);
+    return c.out.items;
+}
+
+/// `'./x'` -> `./x` : retire les guillemets et résout les échappements.
+/// Sans `\` (le cas de 99,9 % des specifiers), renvoie une tranche du source —
+/// aucune allocation. En cas d'échappement invalide, on garde le caractère brut
+/// (on décode, on ne valide pas : le lexer a déjà validé).
+pub fn decodeStringLiteral(arena: std.mem.Allocator, raw: []const u8) []const u8 {
+    if (raw.len < 2) return raw; // défensif (littéral synthétique nu)
+    const inner = raw[1 .. raw.len - 1];
+    if (std.mem.indexOfScalar(u8, inner, '\\') == null) return inner;
+
+    var out: std.ArrayList(u8) = .empty;
+    out.ensureTotalCapacity(arena, inner.len) catch return inner;
+    var i: usize = 0;
+    while (i < inner.len) {
+        const ch = inner[i];
+        if (ch != '\\' or i + 1 >= inner.len) {
+            out.append(arena, ch) catch return inner;
+            i += 1;
+            continue;
+        }
+        i += 1; // consomme le `\`
+        const esc = inner[i];
+        i += 1;
+        switch (esc) {
+            'n' => out.append(arena, '\n') catch return inner,
+            't' => out.append(arena, '\t') catch return inner,
+            'r' => out.append(arena, '\r') catch return inner,
+            'b' => out.append(arena, 0x08) catch return inner,
+            'f' => out.append(arena, 0x0C) catch return inner,
+            'v' => out.append(arena, 0x0B) catch return inner,
+            '0' => out.append(arena, 0) catch return inner,
+            '\n' => {}, // continuation de ligne : le `\` + le saut disparaissent
+            'x' => {
+                const cp = parseHex(inner, &i, 2) orelse continue;
+                appendCodepoint(arena, &out, cp);
+            },
+            'u' => {
+                const cp = parseUnicodeEscape(inner, &i) orelse continue;
+                appendCodepoint(arena, &out, cp);
+            },
+            else => out.append(arena, esc) catch return inner, // \\ \' \" \` \/ …
+        }
+    }
+    return out.items;
+}
+
+/// `ꯍ` ou `\u{1F600}` (le `\u` est déjà consommé). Recombine une paire de
+/// surrogates `😀` en un seul code point.
+fn parseUnicodeEscape(s: []const u8, i: *usize) ?u21 {
+    if (i.* < s.len and s[i.*] == '{') {
+        i.* += 1;
+        const end = std.mem.indexOfScalarPos(u8, s, i.*, '}') orelse return null;
+        const cp = std.fmt.parseInt(u21, s[i.*..end], 16) catch return null;
+        i.* = end + 1;
+        return cp;
+    }
+    const hi = parseHex(s, i, 4) orelse return null;
+    if (hi < 0xD800 or hi > 0xDBFF) return hi;
+    // High surrogate : la moitié basse suit-elle, sous forme d'un autre `\uXXXX` ?
+    const save = i.*;
+    if (i.* + 2 <= s.len and s[i.*] == '\\' and s[i.* + 1] == 'u') {
+        i.* += 2;
+        if (parseHex(s, i, 4)) |lo| {
+            if (lo >= 0xDC00 and lo <= 0xDFFF)
+                return 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
+        }
+        i.* = save; // pas une paire valide : on rend les octets
+    }
+    return hi;
+}
+
+fn parseHex(s: []const u8, i: *usize, comptime n: usize) ?u21 {
+    if (i.* + n > s.len) return null;
+    const v = std.fmt.parseInt(u21, s[i.* .. i.* + n], 16) catch return null;
+    i.* += n;
+    return v;
+}
+
+/// Encode `cp` en UTF-8. Un surrogate isolé (illégal en UTF-8) devient U+FFFD.
+fn appendCodepoint(arena: std.mem.Allocator, out: *std.ArrayList(u8), cp: u21) void {
+    var buf: [4]u8 = undefined;
+    const n = std.unicode.utf8Encode(cp, &buf) catch {
+        out.appendSlice(arena, "\u{FFFD}") catch {};
+        return;
+    };
+    out.appendSlice(arena, buf[0..n]) catch {};
 }
 
 // ------------------------------------------------------------------ tests
@@ -631,4 +863,183 @@ test "clés d'objet / propriétés de membre ne sont pas des références" {
     try std.testing.expect(!p.unresolved("b"));
     try std.testing.expect(p.unresolved("v"));
     try std.testing.expect(p.unresolved("c")); // shorthand {c} = référence
+}
+
+// ---- module records ----
+
+const Records = struct {
+    arena: std.heap.ArenaAllocator,
+    items: []const ModuleRecord,
+    fn deinit(self: *Records) void {
+        self.arena.deinit();
+    }
+};
+
+fn records(gpa: std.mem.Allocator, src: []const u8, ts: bool) !Records {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    const a = arena.allocator();
+    const program = (try parser.parseWith(a, src, false, ts)).program;
+    // En DEUX temps, obligatoirement : dans un `return .{ .arena = arena,
+    // .items = moduleRecords(a, …) }`, l'arène est copiée dans le slot de retour
+    // AVANT que `.items` n'alloue — l'allocation partirait dans la copie locale,
+    // que le `deinit` de la copie retournée ne connaît pas (fuite).
+    const items = moduleRecords(a, program, src);
+    return .{ .arena = arena, .items = items };
+}
+
+test "moduleRecords : import / re-export / export * / import() dynamique" {
+    var r = try records(std.testing.allocator,
+        \\import a from './a.js';
+        \\import './side-effect.css';
+        \\export { b } from './b';
+        \\export * from './c';
+        \\const lazy = () => import('./d');
+    , false);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 5), r.items.len);
+    // L'ordre du SOURCE est préservé.
+    try std.testing.expectEqualStrings("./a.js", r.items[0].specifier);
+    try std.testing.expectEqual(ModuleRecordKind.import, r.items[0].kind);
+    try std.testing.expectEqualStrings("./side-effect.css", r.items[1].specifier);
+    try std.testing.expectEqual(ModuleRecordKind.import, r.items[1].kind);
+    try std.testing.expectEqualStrings("./b", r.items[2].specifier);
+    try std.testing.expectEqual(ModuleRecordKind.re_export, r.items[2].kind);
+    try std.testing.expectEqualStrings("./c", r.items[3].specifier);
+    try std.testing.expectEqual(ModuleRecordKind.export_all, r.items[3].kind);
+    try std.testing.expectEqualStrings("./d", r.items[4].specifier);
+    try std.testing.expectEqual(ModuleRecordKind.dynamic_import, r.items[4].kind);
+}
+
+test "moduleRecords : le span pointe sur le littéral, guillemets inclus" {
+    const src = "import x from './a';";
+    var r = try records(std.testing.allocator, src, false);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 1), r.items.len);
+    try std.testing.expectEqualStrings("'./a'", src[r.items[0].start..r.items[0].end]);
+}
+
+test "moduleRecords : `export { a }` SANS `from` n'est pas une dépendance" {
+    var r = try records(std.testing.allocator, "const a = 1; export { a }; export default a;", false);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 0), r.items.len);
+}
+
+test "moduleRecords : import() calculé et import.meta sont ignorés" {
+    var r = try records(std.testing.allocator, "const u = import.meta.url; import(path); import(`./${x}`);", false);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 0), r.items.len);
+}
+
+test "moduleRecords : TS type-only marqué (pas une dépendance runtime)" {
+    var r = try records(std.testing.allocator, "import type { T } from './t'; import { v } from './v';", true);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 2), r.items.len);
+    try std.testing.expect(r.items[0].type_only);
+    try std.testing.expect(!r.items[1].type_only);
+}
+
+test "moduleRecords : échappements décodés dans le specifier" {
+    var r = try records(std.testing.allocator, "import a from './caf\\u00e9/\\x41';", false);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 1), r.items.len);
+    try std.testing.expectEqualStrings("./café/A", r.items[0].specifier);
+}
+
+test "moduleRecords : code cassé -> ce qui reste lisible est récupéré" {
+    // Error recovery : l'import cassé disparaît, les sains restent.
+    var r = try records(std.testing.allocator, "import a from './a'; import from; import c from './c';", false);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 2), r.items.len);
+    try std.testing.expectEqualStrings("./a", r.items[0].specifier);
+    try std.testing.expectEqualStrings("./c", r.items[1].specifier);
+}
+
+test "moduleRecords : imports imbriqués (dynamique dans une fonction)" {
+    var r = try records(std.testing.allocator,
+        \\async function load() {
+        \\  if (cond) { const m = await import("./deep/mod.ts"); return m; }
+        \\}
+    , false);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 1), r.items.len);
+    try std.testing.expectEqualStrings("./deep/mod.ts", r.items[0].specifier);
+    try std.testing.expectEqual(ModuleRecordKind.dynamic_import, r.items[0].kind);
+}
+
+test "export * as ns : `ns` n'est PAS un binding local ni une référence" {
+    var p = try probe(std.testing.allocator, "export * as ns from './m'; const x = 1;");
+    defer p.deinit();
+    // Ni déclaré (ce n'est pas `import * as ns`), ni unresolved (ce n'est pas
+    // une référence) : c'est un NOM D'EXPORT, comme le `b` de `export { a as b }`.
+    try std.testing.expectEqual(@as(usize, 0), p.bindingCount("ns"));
+    try std.testing.expect(!p.unresolved("ns"));
+    try std.testing.expectEqual(@as(usize, 0), p.diags());
+}
+
+test "export * as ns : contraste avec `import * as ns` (LUI est un binding)" {
+    var p = try probe(std.testing.allocator, "import * as ns from './m'; ns.x;");
+    defer p.deinit();
+    try std.testing.expectEqual(@as(usize, 1), p.bindingCount("ns"));
+    try std.testing.expectEqual(@as(usize, 1), p.totalRefs("ns"));
+}
+
+test "import attributes : les clés ne sont ni des bindings ni des références" {
+    var p = try probe(std.testing.allocator, "import d from './d.json' with { type: 'json' };");
+    defer p.deinit();
+    try std.testing.expect(!p.unresolved("type"));
+    try std.testing.expectEqual(@as(usize, 0), p.bindingCount("type"));
+    try std.testing.expectEqual(@as(usize, 0), p.diags());
+}
+
+test "moduleRecords : export * as ns -> kind export_all_as + name" {
+    var r = try records(std.testing.allocator,
+        \\export * from './plain';
+        \\export * as ns from './named';
+    , false);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 2), r.items.len);
+    try std.testing.expectEqual(ModuleRecordKind.export_all, r.items[0].kind);
+    try std.testing.expectEqual(@as(?[]const u8, null), r.items[0].name);
+    try std.testing.expectEqual(ModuleRecordKind.export_all_as, r.items[1].kind);
+    try std.testing.expectEqualStrings("ns", r.items[1].name.?);
+    try std.testing.expectEqualStrings("./named", r.items[1].specifier);
+}
+
+test "moduleRecords : les attributs sont exposés, décodés" {
+    var r = try records(std.testing.allocator,
+        \\import d from './d.json' with { type: 'json' };
+        \\import './a.css' with { type: 'css' };
+        \\export { x } from './x.json' with { type: 'json' };
+        \\export * as data from './y.json' assert { type: 'json' };
+        \\import plain from './plain.js';
+    , false);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 5), r.items.len);
+    try std.testing.expectEqual(@as(usize, 1), r.items[0].attributes.len);
+    try std.testing.expectEqualStrings("type", r.items[0].attributes[0].key);
+    try std.testing.expectEqualStrings("json", r.items[0].attributes[0].value);
+    try std.testing.expectEqualStrings("css", r.items[1].attributes[0].value);
+    try std.testing.expectEqualStrings("json", r.items[2].attributes[0].value);
+    // `assert` : même contenu exposé, le mot-clé n'est qu'une question de syntaxe.
+    try std.testing.expectEqualStrings("json", r.items[3].attributes[0].value);
+    // Sans clause : slice vide, pas de null à gérer côté consommateur.
+    try std.testing.expectEqual(@as(usize, 0), r.items[4].attributes.len);
+}
+
+test "moduleRecords : clé string décodée comme les valeurs" {
+    var r = try records(std.testing.allocator, "import x from './y' with { 'a-b': 'v\\u0041' };", false);
+    defer r.deinit();
+    try std.testing.expectEqualStrings("a-b", r.items[0].attributes[0].key);
+    try std.testing.expectEqualStrings("vA", r.items[0].attributes[0].value);
+}
+
+test "moduleRecords : import(src, options) reste un dynamic_import sans attributs" {
+    var r = try records(std.testing.allocator, "import('./x.json', { with: { type: 'json' } });", false);
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 1), r.items.len);
+    try std.testing.expectEqual(ModuleRecordKind.dynamic_import, r.items[0].kind);
+    try std.testing.expectEqualStrings("./x.json", r.items[0].specifier);
+    // Les options d'un import() sont une EXPRESSION quelconque : on ne devine
+    // rien (l'AST porte `ImportExpression.options` pour qui veut l'analyser).
+    try std.testing.expectEqual(@as(usize, 0), r.items[0].attributes.len);
 }

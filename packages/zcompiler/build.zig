@@ -10,10 +10,21 @@ const std = @import("std");
 /// L'addon importe le module `zignapi` (résolu via build.zig.zon). `link_libc`
 /// est décidé ICI selon la cible : le backend N-API a besoin de libc, le backend
 /// wasm freestanding le REFUSE (cf. build.zig de zignapi).
+///
+/// Ce build expose aussi le module **`zcompiler`** (`native/root.zig`) : le
+/// compilateur en tant que BIBLIOTHÈQUE Zig, pour les consommateurs externes
+/// (zbundle). Cf. `native/root.zig` pour le « pourquoi un seul module ».
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const is_wasm = target.result.cpu.arch.isWasm();
+
+    // Le module public : `@import("zcompiler")` chez le consommateur. Pas de
+    // target/optimize (chaque consommateur pose les siens), pas de `link_libc`
+    // (Zig pur, sans N-API : compile aussi bien en natif qu'en wasm).
+    _ = b.addModule("zcompiler", .{
+        .root_source_file = b.path("native/root.zig"),
+    });
 
     const zignapi_dep = b.dependency("zignapi", .{});
     const zignapi = zignapi_dep.module("zignapi");
@@ -46,7 +57,7 @@ pub fn build(b: *std.Build) void {
     // parser.zig tire ast.zig + lexer.zig ; on ajoute lexer.zig comme racine à
     // part pour exécuter aussi SES tests.
     const test_step = b.step("test", "Lancer les tests Zig (lexer + parser + printer + transformer + semantic + mangler)");
-    for ([_][]const u8{ "native/lexer.zig", "native/parser.zig", "native/printer.zig", "native/transformer.zig", "native/semantic.zig", "native/mangler.zig", "native/jsx_transform.zig" }) |root| {
+    for ([_][]const u8{ "native/lexer.zig", "native/parser.zig", "native/printer.zig", "native/transformer.zig", "native/semantic.zig", "native/mangler.zig", "native/jsx_transform.zig", "native/root.zig" }) |root| {
         const tests_mod = b.createModule(.{
             .root_source_file = b.path(root),
             .target = target,

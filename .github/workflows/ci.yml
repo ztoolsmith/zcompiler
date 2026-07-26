@@ -80,11 +80,11 @@ jobs:
       - name: Corpus (parse/roundtrip/transform/semantic/mangle/recovery/ts/jsx/tsx)
         working-directory: zcompiler
         run: |
-          node playground/corpus.js corpus/nosemi corpus/unicode
-          node playground/corpus.js --roundtrip corpus/nosemi corpus/unicode
-          node playground/corpus.js --transform corpus/nosemi corpus/unicode
-          node playground/corpus.js --semantic corpus/nosemi corpus/unicode
-          node playground/corpus.js --mangle corpus/nosemi corpus/unicode
+          node playground/corpus.js corpus/nosemi corpus/unicode corpus/esm
+          node playground/corpus.js --roundtrip corpus/nosemi corpus/unicode corpus/esm
+          node playground/corpus.js --transform corpus/nosemi corpus/unicode corpus/esm
+          node playground/corpus.js --semantic corpus/nosemi corpus/unicode corpus/esm
+          node playground/corpus.js --mangle corpus/nosemi corpus/unicode corpus/esm
           node playground/corpus.js --recovery corpus/broken
           node playground/corpus.js --ts-strip corpus/ts
           node playground/corpus.js --tsx corpus/tsx
@@ -95,7 +95,7 @@ jobs:
       - name: Snapshot API — natif == wasm (byte-identique)
         working-directory: zcompiler/packages/zcompiler
         run: |
-          DIRS="../../corpus/ts ../../corpus/tsx ../../corpus/jsx ../../corpus/broken ../../corpus/unicode ../../corpus/nosemi"
+          DIRS="../../corpus/ts ../../corpus/tsx ../../corpus/jsx ../../corpus/broken ../../corpus/unicode ../../corpus/nosemi ../../corpus/esm"
           node scripts/api-snapshot.mjs ./index.js $DIRS > native.json
           node scripts/api-snapshot.mjs ./wasm.js  $DIRS > wasm.json
           diff native.json wasm.json && echo "✓ deux backends, une vérité"

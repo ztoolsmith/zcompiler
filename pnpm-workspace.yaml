@@ -1,3 +1,27 @@
 packages:
   - "packages/*"
   - "playground"
+
+# pnpm refuse par défaut d'installer un paquet publié il y a moins de N jours
+# (garde anti-supply-chain). Nos propres packages de plateforme sont publiés puis
+# réinstallés dans la foulée : on les exempte.
+#
+# RÈGLE (apprise à la 0.2.0) : ces entrées doivent couvrir les versions PRÉSENTES
+# DANS LE LOCKFILE, pas seulement celle qu'on prépare. Pendant une release on a
+# donc les DEUX : l'ancienne (que le lockfile référence encore tant que la
+# nouvelle n'est pas publiée — sinon `pnpm install` casse net) et la nouvelle
+# (pour l'install juste après la publication). On purge l'ancienne au cycle
+# suivant, une fois le lockfile à jour.
+minimumReleaseAgeExclude:
+  - '@zcompiler/binding-darwin-arm64@0.1.0'
+  - '@zcompiler/binding-darwin-x64@0.1.0'
+  - '@zcompiler/binding-linux-arm64-gnu@0.1.0'
+  - '@zcompiler/binding-linux-x64-gnu@0.1.0'
+  - '@zcompiler/binding-linux-x64-musl@0.1.0'
+  - '@zcompiler/binding-win32-x64-msvc@0.1.0'
+  - '@zcompiler/binding-darwin-arm64@0.2.0'
+  - '@zcompiler/binding-darwin-x64@0.2.0'
+  - '@zcompiler/binding-linux-arm64-gnu@0.2.0'
+  - '@zcompiler/binding-linux-x64-gnu@0.2.0'
+  - '@zcompiler/binding-linux-x64-musl@0.2.0'
+  - '@zcompiler/binding-win32-x64-msvc@0.2.0'

@@ -767,3 +767,107 @@ test("index.d.ts déclare tokenize et parse", () => {
   assert.match(dts, /export function tokenize\(arg0: string\)/);
   assert.match(dts, /export function parse\(arg0: string\)/);
 });
+
+// ---- ESM 0.2.0 : export * as ns (ES2020) + import attributes (ES2025) ----
+// Les deux trous révélés par zbundle, le premier consommateur externe.
+
+test("export * as ns from : parse, et les deux formes se distinguent", () => {
+  assert.strictEqual(api.parseErrors("export * as ns from './x';").length, 0);
+  assert.strictEqual(api.parseErrors("export * from './x';").length, 0);
+  // `default` est un nom d'export légal derrière `as`.
+  assert.strictEqual(api.parseErrors("export * as default from './x';").length, 0);
+  const named = api.parse("export * as ns from './x';");
+  const plain = api.parse("export * from './x';");
+  assert.match(named, /ExportAllDeclaration/);
+  assert.match(named, /Identifier ns/);
+  assert.doesNotMatch(plain, /Identifier/);
+});
+
+test("export * as ns : réimprimé fidèlement (round-trip)", () => {
+  for (const src of [
+    "export * from './x';",
+    "export * as ns from './x';",
+    "export * as default from './x';",
+  ]) {
+    assert.strictEqual(api.print(src), src + "\n");
+    assert.strictEqual(api.parse(api.print(src)), api.parse(src));
+  }
+});
+
+test("export * as ns : `ns` n'est ni un binding local ni un unresolved", () => {
+  const s = api.semantic("export * as ns from './m'; const x = 1;");
+  // C'est un NOM D'EXPORT (comme le `b` de `export { a as b }`), pas un binding.
+  assert.ok(![...s.unresolved].includes("ns"));
+  assert.strictEqual(s.diagnostics.length, 0);
+  // Contraste : `import * as ns` LUI crée un binding, référençable.
+  const imported = api.semantic("import * as ns from './m'; ns.x;");
+  assert.ok(![...imported.unresolved].includes("ns"));
+  assert.strictEqual(imported.resolved, 1);
+});
+
+test("import attributes : les trois formes statiques parsent", () => {
+  for (const src of [
+    "import d from './d.json' with { type: 'json' };",
+    "import './a.css' with { type: 'css' };",
+    "import * as ns from './m.json' with { type: 'json' };",
+    "import a, { b as c } from './m.json' with { type: 'json' };",
+    "export { a } from './b.json' with { type: 'json' };",
+    "export * from './b.json' with { type: 'json' };",
+    "export * as d from './b.json' with { type: 'json' };",
+  ]) {
+    assert.strictEqual(api.parseErrors(src).length, 0, src);
+    assert.match(api.parse(src), /ImportAttribute/);
+    assert.strictEqual(api.parse(api.print(src)), api.parse(src), src); // round-trip
+  }
+});
+
+test("import attributes : `assert` accepté ET préservé (alias déprécié)", () => {
+  const src = "import d from './d.json' assert { type: 'json' };";
+  assert.strictEqual(api.parseErrors(src).length, 0);
+  // Pas réécrit en `with` : un formateur ne change pas la syntaxe dans son dos.
+  assert.strictEqual(api.print(src), src + "\n");
+});
+
+test("import attributes : la valeur doit être une string, UNE erreur claire", () => {
+  const errs = api.parseErrors("import d from './d.json' with { type: json };\nconst ok = 1;");
+  assert.strictEqual(errs.length, 1);
+  assert.match(errs[0].message, /import attribute value must be a string/);
+});
+
+test("import attributes : un `with` malformé ne tue pas le fichier", () => {
+  const src = "import a from './a' with { type: ;\nconst ok = 1;\nconst also = 2;";
+  const errs = api.parseErrors(src);
+  assert.ok(errs.length > 0);
+  // Les statements sains d'après survivent, et print ne plante pas.
+  assert.match(api.print(src), /const ok = 1/);
+  assert.match(api.print(src), /const also = 2/);
+});
+
+test("import(src, options) : le 2e argument (ES2025) parse et round-trip", () => {
+  const src = "const p = import('./x.json', { with: { type: 'json' } });";
+  assert.strictEqual(api.parseErrors(src).length, 0);
+  assert.strictEqual(api.parse(api.print(src)), api.parse(src));
+  assert.match(api.print(src), /import\('\.\/x\.json', \{ with: \{ type: 'json' \} \}\)/);
+});
+
+test("non-régression : `with` et `assert` restent des identifiants ordinaires", () => {
+  const src = "const assert = 1; const o = { with: 2, assert: 3 }; o.with; o.assert;";
+  assert.strictEqual(api.parseErrors(src).length, 0);
+  assert.strictEqual(api.semantic(src).diagnostics.length, 0);
+});
+
+test("les nouvelles syntaxes traversent tout le pipeline (mangle inclus)", () => {
+  const src = [
+    "import cfg from './c.json' with { type: 'json' };",
+    "export * as ns from './m.js';",
+    "const local = cfg.value;",
+    "export { local };",
+  ].join("\n");
+  assert.strictEqual(api.parseErrors(src).length, 0);
+  const mangled = api.mangle(src);
+  assert.strictEqual(api.parseErrors(mangled).length, 0);
+  assert.strictEqual(api.semantic(mangled).diagnostics.length, 0);
+  // L'attribut et le nom d'export survivent au mangle (ce ne sont pas des locaux).
+  assert.match(mangled, /with \{ type: 'json' \}/);
+  assert.match(mangled, /export \* as ns from/);
+});

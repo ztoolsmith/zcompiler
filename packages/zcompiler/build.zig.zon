@@ -1,7 +1,10 @@
 .{
-    .name = .zparse,
-    .version = "0.0.1",
-    .fingerprint = 0xf8cfc71e4918958, // Changing this has security and trust implications.
+    .name = .zcompiler,
+    .version = "0.2.0",
+    // Renommé `.zparse` -> `.zcompiler` (2026-07-26) : le nom du paquet Zig était
+    // resté à l'ancien nom du projet. Zig dérive une partie du fingerprint du nom,
+    // d'où la nouvelle valeur (imposée par le compilateur).
+    .fingerprint = 0x4cc43fc544411b9b, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .zignapi = .{ .path = "../../../zignapi/packages/zignapi" },

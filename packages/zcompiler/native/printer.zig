@@ -279,6 +279,10 @@ const Printer = struct {
             .import_expression => |ie| {
                 try self.w("import(");
                 try self.expr(ie.source, PREC_ASSIGN);
+                if (ie.options) |o| { // `import(src, { with: { type: 'json' } })`
+                    try self.w(", ");
+                    try self.expr(o, PREC_ASSIGN);
+                }
                 try self.wc(')');
             },
             .array_expression => |a| {
@@ -1064,8 +1068,14 @@ const Printer = struct {
                 try self.wc(';');
             },
             .export_all_declaration => |e| {
-                try self.w("export * from ");
+                try self.w("export *");
+                if (e.exported) |ns| { // `export * as ns from …`
+                    try self.w(" as ");
+                    try self.w(ns.litText(self.source));
+                }
+                try self.w(" from ");
                 try self.span(e.source);
+                try self.attributes(e.attributes);
                 try self.wc(';');
             },
             else => return error.Unprintable,
@@ -1145,8 +1155,10 @@ const Printer = struct {
         try self.w("import ");
         if (imp.type_only) try self.w("type "); // TS : `import type { … }`
         if (imp.specifiers.len == 0) {
-            // import "side-effect";
+            // import "side-effect";  (avec ses attributs : `import './a.css'
+            // with { type: 'css' }` — la forme la plus courante pour un asset)
             try self.span(imp.source);
+            try self.attributes(imp.attributes);
             try self.wc(';');
             return;
         }
@@ -1187,7 +1199,24 @@ const Printer = struct {
         if (in_named) try self.w(" }");
         try self.w(" from ");
         try self.w(imp.source.litText(self.source));
+        try self.attributes(imp.attributes);
         try self.wc(';');
+    }
+
+    /// La clause `with { type: 'json' }` (ES2025), rien si elle est absente.
+    /// Réémet `assert` si la source disait `assert` : un formateur ne réécrit pas
+    /// la syntaxe de l'utilisateur, même dépréciée.
+    fn attributes(self: *Printer, attrs: ast.Node.Attributes) Error!void {
+        if (attrs.entries.len == 0) return;
+        try self.w(if (attrs.deprecated_assert) " assert { " else " with { ");
+        for (attrs.entries, 0..) |entry, i| {
+            if (i != 0) try self.w(", ");
+            const a = entry.kind.import_attribute;
+            try self.w(a.key.litText(self.source));
+            try self.w(": ");
+            try self.w(a.value.litText(self.source));
+        }
+        try self.w(" }");
     }
 
     fn exportNamed(self: *Printer, node: *const Node) Error!void {
@@ -1213,6 +1242,7 @@ const Printer = struct {
         if (e.source) |src| {
             try self.w(" from ");
             try self.span(src);
+            try self.attributes(e.attributes);
         }
         try self.wc(';');
     }
@@ -1350,4 +1380,54 @@ test "printer : cover grammar shorthand-défaut en objet" {
     try expectRoundtrip(gpa, "({ x = 1 } = o)");
     try expectRoundtrip(gpa, "({ a, b = 2, c: d = 3, ...rest } = o)");
     try expectPrint(gpa, "({ x = 1 } = o)", "({ x = 1 } = o);\n");
+}
+
+test "printer : export * as ns from (ES2020) — les deux formes" {
+    const gpa = std.testing.allocator;
+    try expectPrint(gpa, "export * from './x'", "export * from './x';\n");
+    try expectPrint(gpa, "export * as ns from './x'", "export * as ns from './x';\n");
+    // `default` est un nom d'export légal derrière `as`.
+    try expectPrint(gpa, "export * as default from './x'", "export * as default from './x';\n");
+    try expectRoundtrip(gpa, "export * from './x'");
+    try expectRoundtrip(gpa, "export * as ns from './x'");
+    try expectRoundtrip(gpa, "export * as default from './x'");
+}
+
+test "printer : import attributes (ES2025) sur les trois formes statiques" {
+    const gpa = std.testing.allocator;
+    try expectPrint(gpa, "import d from './d.json' with { type: 'json' }", "import d from './d.json' with { type: 'json' };\n");
+    // Side-effect : la forme la plus courante pour un asset.
+    try expectPrint(gpa, "import './a.css' with { type: 'css' }", "import './a.css' with { type: 'css' };\n");
+    try expectPrint(gpa, "export { a } from './b.json' with { type: 'json' }", "export { a } from './b.json' with { type: 'json' };\n");
+    try expectPrint(gpa, "export * from './b.json' with { type: 'json' }", "export * from './b.json' with { type: 'json' };\n");
+    try expectPrint(gpa, "export * as d from './b.json' with { type: 'json' }", "export * as d from './b.json' with { type: 'json' };\n");
+    // Plusieurs entrées, clé string, virgule finale.
+    try expectPrint(gpa, "import x from './y' with { 'a-b': 'v', type: 'json', }", "import x from './y' with { 'a-b': 'v', type: 'json' };\n");
+}
+
+test "printer : `assert` déprécié est PRÉSERVÉ (pas réécrit en `with`)" {
+    const gpa = std.testing.allocator;
+    try expectPrint(gpa, "import d from './d.json' assert { type: 'json' }", "import d from './d.json' assert { type: 'json' };\n");
+    try expectRoundtrip(gpa, "import d from './d.json' assert { type: 'json' }");
+}
+
+test "printer : import(src, options) — le 2e argument (ES2025)" {
+    const gpa = std.testing.allocator;
+    try expectPrint(gpa, "import('./x')", "import('./x');\n");
+    try expectPrint(gpa, "import('./x.json', { with: { type: 'json' } })", "import('./x.json', { with: { type: 'json' } });\n");
+    try expectRoundtrip(gpa, "const p = import('./x.json', { with: { type: 'json' } })");
+}
+
+test "printer : round-trip des attributs sur tout le spectre" {
+    const gpa = std.testing.allocator;
+    for ([_][]const u8{
+        "import './a.css' with { type: 'css' }",
+        "import d from './d.json' with { type: 'json' }",
+        "import * as ns from './m.json' with { type: 'json' }",
+        "import a, { b as c } from './m.json' with { type: 'json' }",
+        "export { a } from './b.json' with { type: 'json' }",
+        "export * from './b.json' with { type: 'json' }",
+        "export * as data from './b.json' assert { type: 'json' }",
+        "import x from './y' with { 'a-b': 'v', type: 'json' }",
+    }) |src| try expectRoundtrip(gpa, src);
 }

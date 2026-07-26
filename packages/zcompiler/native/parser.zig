@@ -1402,8 +1402,17 @@ const Parser = struct {
                         self.advance(); // 'import'
                         try self.expect(.l_paren, "'('");
                         const src = try self.parseAssignment();
+                        // ES2025 : 2e argument optionnel (les options d'import,
+                        // `{ with: { type: 'json' } }`). C'est une **expression
+                        // quelconque** — contrairement au `with { … }` statique,
+                        // la grammaire ne la contraint pas. Virgule finale tolérée.
+                        var options: ?*ast.Node = null;
+                        if (self.match(.comma) and !self.atKind(.r_paren)) {
+                            options = try self.parseAssignment();
+                            _ = self.match(.comma);
+                        }
                         const close = try self.eat(.r_paren, "')'");
-                        return self.makeNode(tok.start, close.end, .{ .import_expression = .{ .source = src } });
+                        return self.makeNode(tok.start, close.end, .{ .import_expression = .{ .source = src, .options = options } });
                     }
                     if (k == .dot) {
                         // import.meta (meta-property des modules ES).
@@ -2824,6 +2833,78 @@ const Parser = struct {
         return self.identNode(t);
     }
 
+    /// La clause d'attributs d'import (ES2025), APRÈS la source d'un module :
+    ///
+    ///     with { type: 'json' }          | with { 'a-b': 'x', type: "json", }
+    ///     assert { type: 'json' }        (ancien mot-clé, cf. plus bas)
+    ///
+    /// Absente = `.{}` (le cas de 99,99 % du code). Partagée par les TROIS
+    /// formes que la grammaire autorise : `import … from`, `export … from`,
+    /// `export * from`.
+    ///
+    /// **`assert` est accepté comme alias déprécié** (même choix qu'esbuild : le
+    /// mot-clé des « import assertions » traîne dans du code réel et le refuser
+    /// n'apporte rien). Il est RETENU (`deprecated_assert`) et réémis tel quel —
+    /// un formateur ne réécrit pas la syntaxe de l'utilisateur dans son dos.
+    ///
+    /// **Raccourci assumé** : la spec interdit un saut de ligne avant `with`.
+    /// On ne l'impose pas — `with`/`assert` sont de simples identifiants pour le
+    /// lexer (ni l'un ni l'autre n'est un mot-clé ici, et le statement `with`
+    /// n'est pas supporté), donc aucune ambiguïté à créer.
+    fn parseImportAttributes(self: *Parser) ParseError!ast.Node.Attributes {
+        const deprecated = blk: {
+            const t = self.at() orelse return .{};
+            if (self.tokenTextIs(t, "with")) break :blk false;
+            if (self.tokenTextIs(t, "assert")) break :blk true;
+            return .{};
+        };
+        self.advance(); // `with` / `assert`
+        try self.expect(.l_brace, "'{'");
+        var entries: std.ArrayList(*ast.Node) = .empty;
+        while (self.at()) |t| {
+            if (t.kind == .r_brace) break;
+            // AttributeKey := IdentifierName | StringLiteral
+            const key = if (t.kind == .string) key: {
+                self.advance();
+                break :key try self.makeNode(t.start, t.end, .{ .string_literal = .{} });
+            } else try self.parseModuleName("attribute key");
+            try self.expect(.colon, "':'");
+            // AttributeValue := StringLiteral, et RIEN d'autre (spec).
+            const vt = self.at() orelse return self.failUnexpected(null, "attribute value string");
+            if (vt.kind != .string) {
+                // 4e « récupération fine » (cf. la section Error recovery du
+                // CLAUDE.md) : on rapporte UNE erreur claire et on saute jusqu'au
+                // `}` de la clause, plutôt que de dérouler jusqu'à la frontière de
+                // statement — le panic mode laisserait traîner le `}` et le `;`,
+                // qui produiraient deux diagnostics parasites derrière le vrai.
+                self.recordError("import attribute value must be a string", vt.start);
+                self.skipToAttributesEnd();
+                return .{ .entries = try entries.toOwnedSlice(self.arena), .deprecated_assert = deprecated };
+            }
+            self.advance();
+            const value = try self.makeNode(vt.start, vt.end, .{ .string_literal = .{} });
+            try entries.append(self.arena, try self.makeNode(key.start, value.end, .{ .import_attribute = .{ .key = key, .value = value } }));
+            if (!self.match(.comma) or self.atKind(.r_brace)) break;
+        }
+        try self.expect(.r_brace, "'}'");
+        return .{ .entries = try entries.toOwnedSlice(self.arena), .deprecated_assert = deprecated };
+    }
+
+    /// Avance jusqu'APRÈS le `}` qui ferme la clause d'attributs (ou jusqu'à une
+    /// frontière de statement si elle n'est jamais fermée — on ne boucle pas).
+    fn skipToAttributesEnd(self: *Parser) void {
+        while (self.at()) |t| {
+            switch (t.kind) {
+                .r_brace => {
+                    self.advance();
+                    return;
+                },
+                .semicolon, .kw_import, .kw_export, .kw_const, .kw_let, .kw_var, .kw_function, .kw_class => return,
+                else => self.advance(),
+            }
+        }
+    }
+
     /// Nom de module/specifier : identifiant OU mot-clé (`default`, etc.).
     fn parseModuleName(self: *Parser, what: []const u8) ParseError!*ast.Node {
         const t = self.at() orelse return self.failUnexpected(null, what);
@@ -2843,8 +2924,13 @@ const Parser = struct {
         // import "side-effect";
         if (self.at()) |t| if (t.kind == .string) {
             const source = try self.parseSourceString();
+            const attributes = try self.parseImportAttributes();
             try self.consumeSemicolon();
-            return self.makeNode(kw.start, source.end, .{ .import_declaration = .{ .specifiers = try self.arena.alloc(*ast.Node, 0), .source = source } });
+            return self.makeNode(kw.start, source.end, .{ .import_declaration = .{
+                .specifiers = try self.arena.alloc(*ast.Node, 0),
+                .source = source,
+                .attributes = attributes,
+            } });
         };
 
         // TS phase 2 : `import type …` (déclaration ENTIÈRE type-only) — `type`
@@ -2866,11 +2952,13 @@ const Parser = struct {
 
         try self.expectContextual("from", "'from'");
         const source = try self.parseSourceString();
+        const attributes = try self.parseImportAttributes();
         try self.consumeSemicolon();
         return self.makeNode(kw.start, source.end, .{ .import_declaration = .{
             .specifiers = try specifiers.toOwnedSlice(self.arena),
             .source = source,
             .type_only = type_only,
+            .attributes = attributes,
         } });
     }
 
@@ -2940,10 +3028,22 @@ const Parser = struct {
         }
 
         if (self.match(.star)) {
+            // `export * as ns from './x'` (ES2020) : `as` est contextuel, comme
+            // dans `import * as ns`. `ns` peut être un mot-clé (`export * as
+            // default from …` est légal) -> parseModuleName.
+            const exported: ?*ast.Node = if (self.matchContextual("as"))
+                try self.parseModuleName("exported name")
+            else
+                null;
             try self.expectContextual("from", "'from'");
             const source = try self.parseSourceString();
+            const attributes = try self.parseImportAttributes();
             try self.consumeSemicolon();
-            return self.makeNode(kw.start, source.end, .{ .export_all_declaration = .{ .source = source } });
+            return self.makeNode(kw.start, source.end, .{ .export_all_declaration = .{
+                .source = source,
+                .exported = exported,
+                .attributes = attributes,
+            } });
         }
 
         // TS phase 2 : `export type { … }` (export ENTIER type-only). `type` devant
@@ -2972,10 +3072,14 @@ const Parser = struct {
                 const close = try self.eat(.r_brace, "'}'");
                 var src: ?*ast.Node = null;
                 var end = close.end;
+                // Les attributs ne sont légaux QUE derrière un `from` (il faut un
+                // module à qualifier) — `export { a } with { … }` n'existe pas.
+                var attributes: ast.Node.Attributes = .{};
                 if (self.matchContextual("from")) {
                     const s = try self.parseSourceString();
                     src = s;
                     end = s.end;
+                    attributes = try self.parseImportAttributes();
                 }
                 try self.consumeSemicolon();
                 return self.makeNode(kw.start, end, .{ .export_named_declaration = .{
@@ -2983,6 +3087,7 @@ const Parser = struct {
                     .specifiers = try specifiers.toOwnedSlice(self.arena),
                     .source = src,
                     .type_only = exp_type_only,
+                    .attributes = attributes,
                 } });
             }
         }
@@ -5174,4 +5279,123 @@ test "TS2 : le `<` générique reste inerte en mode JS (non-régression)" {
     defer gpa.free(t);
     try std.testing.expect(std.mem.indexOf(u8, t, "TypeArgs") == null);
     try std.testing.expect(std.mem.indexOf(u8, t, "BinaryExpression") != null);
+}
+
+test "export * as ns from (ES2020) : les deux formes dans l'arbre" {
+    const gpa = std.testing.allocator;
+    // `export *` nu : pas de nom d'export.
+    {
+        const t = try programTreeOf(gpa, "export * from './x';");
+        defer gpa.free(t);
+        try std.testing.expect(std.mem.indexOf(u8, t, "ExportAllDeclaration") != null);
+        try std.testing.expect(std.mem.indexOf(u8, t, "Identifier ns") == null);
+    }
+    // `export * as ns` : le nom d'export apparaît AVANT la source.
+    {
+        const t = try programTreeOf(gpa, "export * as ns from './x';");
+        defer gpa.free(t);
+        try std.testing.expect(std.mem.indexOf(u8, t, "ExportAllDeclaration") != null);
+        const ns = std.mem.indexOf(u8, t, "Identifier ns").?;
+        const src = std.mem.indexOf(u8, t, "StringLiteral './x'").?;
+        try std.testing.expect(ns < src);
+    }
+    // Mot-clé comme nom d'export : `export * as default from` est légal.
+    {
+        const t = try programTreeOf(gpa, "export * as default from './x';");
+        defer gpa.free(t);
+        try std.testing.expect(std.mem.indexOf(u8, t, "Identifier default") != null);
+    }
+}
+
+test "export * as : `as` sans nom -> diagnostic, le statement suivant survit" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const r = try parse(arena.allocator(), "export * as from './x';\nconst ok = 1;");
+    try std.testing.expect(r.errors.len > 0);
+    // Recovery : le `const ok = 1;` d'après est bien là.
+    try std.testing.expect(r.program.kind.program.body.len >= 2);
+}
+
+test "import attributes : parsées sur les trois formes statiques" {
+    const gpa = std.testing.allocator;
+    for ([_][]const u8{
+        "import d from './d.json' with { type: 'json' };",
+        "import './a.css' with { type: 'css' };",
+        "import * as ns from './m.json' with { type: 'json' };",
+        "export { a } from './b.json' with { type: 'json' };",
+        "export * from './b.json' with { type: 'json' };",
+        "export * as d from './b.json' with { type: 'json' };",
+        "import d from './d.json' assert { type: 'json' };",
+    }) |src| {
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        const r = try parse(arena.allocator(), src);
+        try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+        const t = try programTreeOf(gpa, src);
+        defer gpa.free(t);
+        try std.testing.expect(std.mem.indexOf(u8, t, "ImportAttribute") != null);
+    }
+}
+
+test "import attributes : la valeur DOIT être une string (spec)" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    // `type: json` (identifiant) est refusé -> diagnostic, pas un crash.
+    const r = try parse(arena.allocator(), "import d from './d.json' with { type: json };\nconst ok = 1;");
+    try std.testing.expect(r.errors.len > 0);
+    try std.testing.expect(r.program.kind.program.body.len >= 2); // recovery
+}
+
+test "import attributes : `with` malformé ne tue pas le fichier" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const r = try parse(arena.allocator(), "import a from './a' with { type: ;\nconst ok = 1;\nconst also = 2;");
+    try std.testing.expect(r.errors.len > 0);
+    // Les statements sains d'après survivent (panic mode + synchronisation).
+    try std.testing.expect(r.program.kind.program.body.len >= 2);
+}
+
+test "import attributes : clé string et virgule finale" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const r = try parse(arena.allocator(), "import x from './y' with { 'a-b': 'v', type: 'json', };");
+    try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+    const attrs = r.program.kind.program.body[0].kind.import_declaration.attributes;
+    try std.testing.expectEqual(@as(usize, 2), attrs.entries.len);
+    try std.testing.expect(!attrs.deprecated_assert);
+}
+
+test "import attributes : `assert` est retenu comme tel (alias déprécié)" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const r = try parse(arena.allocator(), "import d from './d.json' assert { type: 'json' };");
+    try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+    try std.testing.expect(r.program.kind.program.body[0].kind.import_declaration.attributes.deprecated_assert);
+}
+
+test "import(src, options) : le 2e argument est parsé (ES2025)" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const r = try parse(arena.allocator(), "const p = import('./x.json', { with: { type: 'json' } });");
+    try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+    const t = try programTreeOf(gpa, "import('./x.json', { with: { type: 'json' } });");
+    defer gpa.free(t);
+    try std.testing.expect(std.mem.indexOf(u8, t, "ImportExpression") != null);
+    try std.testing.expect(std.mem.indexOf(u8, t, "ObjectExpression") != null);
+}
+
+test "import() : `with` reste un identifiant ordinaire ailleurs" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    // Non-régression : `with` n'est PAS un mot-clé du lexer, il doit rester
+    // utilisable comme nom (variable, propriété, clé).
+    const r = try parse(arena.allocator(), "const with_ = 1; const o = { with: 2 }; o.with; let assert = 3;");
+    try std.testing.expectEqual(@as(usize, 0), r.errors.len);
 }
