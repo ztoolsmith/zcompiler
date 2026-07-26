@@ -1,17 +1,17 @@
 name: Release
 
-# Déclenché par un tag v* (ex. v0.2.0). Le job principal (ci.yml) sert de gate :
-# tout vert ou rien. Ensuite on collecte les binaires de TOUS les triples (Linux
-# cross-compile darwin+linux+wasm ; Windows fournit le .node MSVC), on assemble
-# les packages, on rejoue la prod simulée, et on SORT les artefacts.
+# Déclenché quand tu PUBLIES un release GitHub (tag v*, ex. v0.1.0). Le job
+# principal (ci.yml) sert de gate : tout vert ou rien. Ensuite on collecte les
+# binaires de TOUS les triples (Linux cross-compile darwin+linux+wasm ; Windows
+# fournit le .node MSVC), on assemble les packages, on rejoue la prod simulée,
+# puis on ATTACHE les tarballs au release ET on PUBLIE sur npm.
 #
-# La publication npm reste MANUELLE pour la 0.2.0 (npm publish à la main depuis
-# les artefacts téléchargés — tu regardes ta première release partir).
-# TODO 0.3.0 : automatiser avec un secret NPM_TOKEN + `npm publish --provenance`.
+# Prérequis : un secret `NPM_TOKEN` (npm → Access Tokens, type "Automation" ou
+# "Publish") dans Settings → Secrets and variables → Actions du repo.
 
 on:
-  push:
-    tags: ["v*"]
+  release:
+    types: [published]
 
 env:
   ZIG_VERSION: 0.16.0
@@ -96,10 +96,13 @@ jobs:
           name: win32
           path: zcompiler/packages/zcompiler/win32.tgz
 
-  # Assemblage : tous les binaires réunis → prepublish → prod simulée → artefacts.
+  # Assemblage : tous les binaires réunis → prepublish → prod simulée → attache au
+  # release + publie sur npm.
   assemble:
     needs: [linux-artifacts, windows-artifacts]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # `gh release upload` : attacher les tarballs au release
     steps:
       - uses: actions/checkout@v4
         with: { path: zcompiler }
@@ -111,7 +114,11 @@ jobs:
         with:
           version: 11.8.0
       - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: pnpm, cache-dependency-path: zcompiler/pnpm-lock.yaml }
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: zcompiler/pnpm-lock.yaml
+          registry-url: "https://registry.npmjs.org" # écrit le .npmrc pour npm publish
       - name: Build zignapi (CLI pour prepublish)
         working-directory: zignapi
         run: pnpm install --frozen-lockfile=false && pnpm --filter zignapi build
@@ -130,20 +137,32 @@ jobs:
       - name: prepublish (assemble npm/<triple>/ + exports map)
         working-directory: zcompiler/packages/zcompiler
         run: pnpm exec zignapi prepublish
-      - name: Prod simulée (npm pack → témoin → require + esbuild)
+      - name: Prod simulée (npm pack → témoin → node + --conditions=browser)
         working-directory: zcompiler/packages/zcompiler
         run: node scripts/prod-witness.mjs
-      - name: npm pack (principal + plateformes) → artefacts de sortie
+      - name: npm pack (principal + plateformes)
         working-directory: zcompiler/packages/zcompiler
         run: |
           mkdir -p /tmp/out
           npm pack --pack-destination /tmp/out
           for d in npm/*/; do (cd "$d" && npm pack --pack-destination /tmp/out); done
           ls -la /tmp/out
-      - name: Upload des tarballs npm (publication MANUELLE ensuite)
+      - name: Upload des tarballs (artefact du workflow)
         uses: actions/upload-artifact@v4
         with:
           name: npm-tarballs
           path: /tmp/out/*.tgz
-      # Publication : télécharger `npm-tarballs`, puis `npm publish <chaque>.tgz`
-      # à la main (accès public pour les packages scopés : `--access public`).
+      - name: Attache les tarballs au release GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" /tmp/out/*.tgz --clobber --repo "${{ github.repository }}"
+      - name: Publie sur npm (plateformes d'abord, principal en dernier)
+        working-directory: /tmp/out
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # Les packages de plateforme d'abord (sinon les optionalDependencies du
+          # principal pointent dans le vide). --access public : requis pour les scopés.
+          for t in *binding*.tgz; do npm publish "$t" --access public; done
+          # Puis le principal (le seul tarball sans "binding" dans le nom).
+          for t in *.tgz; do case "$t" in *binding*) ;; *) npm publish "$t" --access public ;; esac; done
