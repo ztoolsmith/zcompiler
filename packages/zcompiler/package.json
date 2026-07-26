@@ -31,7 +31,7 @@
     ]
   },
   "devDependencies": {
-    "zignapi": "0.3.1"
+    "zignapi": "0.4.1"
   },
   "license": "MIT",
   "optionalDependencies": {
