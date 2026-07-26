@@ -1,6 +1,6 @@
 # zcompiler
 
-[![CI](https://github.com/serian/zcompiler/actions/workflows/ci.yml/badge.svg)](https://github.com/serian/zcompiler/actions/workflows/ci.yml)
+[![CI](https://github.com/ztoolsmith/zcompiler/actions/workflows/ci.yml/badge.svg)](https://github.com/ztoolsmith/zcompiler/actions/workflows/ci.yml)
 
 Un **compilateur JavaScript écrit en Zig**, construit étape par étape à la manière
 d'[OXC](https://oxc.rs)/Babel, exposé à Node.js via [zignapi](../zignapi) (bindings

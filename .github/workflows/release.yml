@@ -12,9 +12,18 @@ name: Release
 on:
   release:
     types: [published]
+  # Déclenchement manuel de secours (si l'event `release` n'a pas tiré) :
+  # Actions → Release → Run workflow, ou `gh workflow run release.yml -f tag=v0.1.0`.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag du release à (re)publier — ex. v0.1.0 (le release doit exister)"
+        required: true
 
 env:
   ZIG_VERSION: 0.16.0
+  # Le tag vient de l'event release, sinon de l'input du dispatch manuel.
+  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 jobs:
   # Tout le job principal (test + snapshot + witness) en préalable.
@@ -155,7 +164,7 @@ jobs:
       - name: Attache les tarballs au release GitHub
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" /tmp/out/*.tgz --clobber --repo "${{ github.repository }}"
+        run: gh release upload "$RELEASE_TAG" /tmp/out/*.tgz --clobber --repo "${{ github.repository }}"
       - name: Publie sur npm (plateformes d'abord, principal en dernier)
         working-directory: /tmp/out
         env:
