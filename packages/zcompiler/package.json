@@ -1,6 +1,6 @@
 {
   "name": "zcompiler",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Parser écrit en Zig pour Node.js, via zignapi",
   "main": "index.js",
   "types": "index.d.ts",
@@ -31,16 +31,16 @@
     ]
   },
   "devDependencies": {
-    "zignapi": "file:../../../zignapi/packages/zignapi"
+    "zignapi": "0.3.1"
   },
   "license": "MIT",
   "optionalDependencies": {
-    "@zcompiler/binding-darwin-arm64": "0.3.0",
-    "@zcompiler/binding-darwin-x64": "0.3.0",
-    "@zcompiler/binding-linux-arm64-gnu": "0.3.0",
-    "@zcompiler/binding-linux-x64-gnu": "0.3.0",
-    "@zcompiler/binding-linux-x64-musl": "0.3.0",
-    "@zcompiler/binding-win32-x64-msvc": "0.3.0"
+    "@zcompiler/binding-darwin-arm64": "0.3.1",
+    "@zcompiler/binding-darwin-x64": "0.3.1",
+    "@zcompiler/binding-linux-arm64-gnu": "0.3.1",
+    "@zcompiler/binding-linux-x64-gnu": "0.3.1",
+    "@zcompiler/binding-linux-x64-musl": "0.3.1",
+    "@zcompiler/binding-win32-x64-msvc": "0.3.1"
   },
   "browser": "wasm.js",
   "exports": {

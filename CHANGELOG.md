@@ -4,6 +4,31 @@ Toutes les modifications notables de zcompiler. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; versionnage
 [SemVer](https://semver.org/lang/fr/).
 
+## [0.3.1] — 2026-07-26
+
+Release de **documentation**. Aucun changement de code : le compilateur est
+strictement identique à la 0.3.0.
+
+### Ajouté
+
+- **`packages/zcompiler/README.md`** — le README du package, celui que npm
+  affiche. Il manquait : la page npm était vide alors que le README racine (côté
+  GitHub) existait depuis longtemps. Écrit en **anglais**, il tient debout tout
+  seul : installation, les deux backends (natif via
+  `@zcompiler/binding-<triple>`, wasm via `wasm.js`), la surface JS complète
+  (jumeaux `*Jsx`/`*Ts`/`*Tsx`, `jsxTransform`, `stripTypes`), le pipeline passe
+  par passe, **les trois décisions d'architecture** qui portent le projet (spans
+  en octets, `synthetic_text`, error recovery), la surface **bibliothèque Zig**
+  (`moduleRecords` / `moduleInfo` / `applyRenames` / `printStatement`) telle
+  qu'un linker la consomme, les chiffres du corpus, et la liste honnête de ce
+  qui n'est PAS fait.
+
+### Note
+
+La 0.2.0 et la 0.3.0 ont été taguées mais **jamais publiées sur npm** (le
+registre s'arrête à la 0.1.0). La 0.3.1 est donc la première publication depuis
+la 0.1.0, et elle embarque tout le contenu des deux versions intermédiaires.
+
 ## [0.3.0] — 2026-07-26
 
 La release **« le compilateur au service d'un linker »**. zbundle v0.2 fusionne
