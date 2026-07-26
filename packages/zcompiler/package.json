@@ -34,14 +34,6 @@
     "zignapi": "0.4.1"
   },
   "license": "MIT",
-  "optionalDependencies": {
-    "@zcompiler/binding-darwin-arm64": "0.3.1",
-    "@zcompiler/binding-darwin-x64": "0.3.1",
-    "@zcompiler/binding-linux-arm64-gnu": "0.3.1",
-    "@zcompiler/binding-linux-x64-gnu": "0.3.1",
-    "@zcompiler/binding-linux-x64-musl": "0.3.1",
-    "@zcompiler/binding-win32-x64-msvc": "0.3.1"
-  },
   "browser": "wasm.js",
   "exports": {
     ".": {

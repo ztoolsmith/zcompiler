@@ -18,8 +18,8 @@ importers:
   packages/zcompiler:
     devDependencies:
       zignapi:
-        specifier: file:../../../zignapi/packages/zignapi
-        version: file:../zignapi/packages/zignapi
+        specifier: 0.4.1
+        version: 0.4.1
 
   playground:
     dependencies:
@@ -40,8 +40,8 @@ packages:
   undici-types@6.21.0:
     resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
 
-  zignapi@file:../zignapi/packages/zignapi:
-    resolution: {directory: ../zignapi/packages/zignapi, type: directory}
+  zignapi@0.4.1:
+    resolution: {integrity: sha512-cN0HJDgwBT1gvHnb+I2Xy1TJ2u/73y9CFY66PbYSHARIGgFpII5HaBBedbrBbrSkWGZaAXoEjAqG1k+PMICrVA==}
     engines: {node: '>=18'}
     hasBin: true
 
@@ -55,4 +55,4 @@ snapshots:
 
   undici-types@6.21.0: {}
 
-  zignapi@file:../zignapi/packages/zignapi: {}
+  zignapi@0.4.1: {}

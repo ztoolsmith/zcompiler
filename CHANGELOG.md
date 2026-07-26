@@ -23,6 +23,16 @@ strictement identique à la 0.3.0.
   qu'un linker la consomme, les chiffres du corpus, et la liste honnête de ce
   qui n'est PAS fait.
 
+### Corrigé
+
+- **Les `optionalDependencies` `@zcompiler/binding-*` ne sont plus déclarées dans
+  le `package.json` committé.** Les y épingler revenait à dépendre d'un artefact
+  qui n'existe qu'**après** la publication : pnpm ne pouvait pas le résoudre,
+  l'omettait du lockfile, et tout `pnpm install --frozen-lockfile` échouait
+  ensuite (`ERR_PNPM_OUTDATED_LOCKFILE`) — CI rouge en boucle. `zignapi
+  prepublish` les écrit désormais à la release : **le paquet publié est
+  identique**, seul le manifeste versionné change.
+
 ### Note
 
 La 0.2.0 et la 0.3.0 ont été taguées mais **jamais publiées sur npm** (le
