@@ -128,9 +128,9 @@ jobs:
           cache: pnpm
           cache-dependency-path: zcompiler/pnpm-lock.yaml
           registry-url: "https://registry.npmjs.org" # écrit le .npmrc pour npm publish
-      - name: Build zignapi (CLI pour prepublish)
+      - name: Build zignapi (CLI seul — pas de zig ici, juste tsc → dist/cli.js)
         working-directory: zignapi
-        run: pnpm install --frozen-lockfile=false && pnpm --filter zignapi build
+        run: pnpm install --frozen-lockfile=false && pnpm --filter zignapi build:ts
       - name: Install
         working-directory: zcompiler
         run: pnpm install --frozen-lockfile=false
