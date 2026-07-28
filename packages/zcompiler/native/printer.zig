@@ -96,13 +96,58 @@ fn calleeHasCall(node: *const Node) bool {
     };
 }
 
+/// Une position de sortie et la position SOURCE dont elle provient — en OCTETS
+/// des deux côtés.
+///
+/// Le printer ne connaît ni lignes ni colonnes : il ne sait pas quel texte
+/// l'entoure une fois concaténé. Il rend donc des offsets bruts, et c'est au
+/// consommateur (un bundler qui assemble N modules) de les convertir. C'est le
+/// dividende des spans byte-exacts posés au jour 1 : la position source est déjà
+/// là, sur chaque nœud, il n'y avait qu'à la faire sortir.
+pub const Mapping = struct {
+    /// Offset dans `out` où commence ce qui est émis.
+    out: u32,
+    /// Offset dans `source` du nœud dont ça provient.
+    src: u32,
+};
+
+/// De quoi le printer alimente un consommateur, en plus du texte.
+pub const Sink = struct {
+    /// Non-null = le printer enregistre ses positions au fil de l'émission.
+    /// Null = comportement d'avant, au bit près.
+    maps: ?*std.ArrayList(Mapping) = null,
+};
+
 const Printer = struct {
     source: []const u8,
     out: *std.ArrayList(u8),
     gpa: std.mem.Allocator,
     depth: usize = 0,
+    maps: ?*std.ArrayList(Mapping) = null,
 
     const Error = std.mem.Allocator.Error || error{Unprintable};
+
+    /// Enregistre « ce qui sort ici vient de là ».
+    ///
+    /// **Un nœud SYNTHÉTIQUE (`end == 0`) n'est pas mappé.** L'IIFE d'un `enum`,
+    /// l'appel `jsx()`, un littéral né du folding : ils ne viennent d'aucun
+    /// caractère du source. Les fabriquer avec `start = 0` (ce que font
+    /// `jsx_transform` et `transformer`) ferait pointer le mapping sur le PREMIER
+    /// caractère du fichier — pire que pas de mapping du tout.
+    ///
+    /// Ne rien émettre est d'ailleurs la BONNE réponse, pas un pis-aller : un
+    /// segment de source map vaut jusqu'au suivant, donc la sortie synthétique
+    /// est attribuée au statement qui l'entoure — exactement « la position
+    /// significative la plus proche ».
+    ///
+    /// Un vrai nœud a toujours `end > start >= 0`, donc `end == 0` est un
+    /// discriminant sûr (et non `start == 0`, qui est légitime pour le premier
+    /// nœud d'un fichier).
+    fn mark(self: *Printer, node: *const Node) Error!void {
+        const maps = self.maps orelse return;
+        if (node.end == 0) return;
+        try maps.append(self.gpa, .{ .out = @intCast(self.out.items.len), .src = node.start });
+    }
 
     fn w(self: *Printer, s: []const u8) Error!void {
         try self.out.appendSlice(self.gpa, s);
@@ -140,8 +185,18 @@ const Printer = struct {
             // ou mangling) -> `litText`.
             // number/boolean/identifier/string peuvent porter un `synthetic_text`
             // (fold, mangling, ou string fabriquée par le transform JSX) -> litText.
-            .number_literal, .boolean_literal, .identifier, .string_literal => try self.w(node.litText(self.source)),
-            .bigint_literal, .regex_literal, .meta_property, .private_name => try self.span(node),
+            // `mark` AVANT `litText` : un identifiant renommé (mangling, ou la
+            // table cross-module d'un linker) garde son NŒUD, seul son texte
+            // change. Le span pointe donc toujours l'identifiant D'ORIGINE —
+            // c'est ce qui rend un bundle renommé débogable, et ça ne coûte rien.
+            .number_literal, .boolean_literal, .identifier, .string_literal => {
+                try self.mark(node);
+                try self.w(node.litText(self.source));
+            },
+            .bigint_literal, .regex_literal, .meta_property, .private_name => {
+                try self.mark(node);
+                try self.span(node);
+            },
             // error recovery : on réémet le SPAN BRUT (pass-through — un formateur
             // doit préserver le code cassé, on ne l'invente pas).
             .error_node => try self.span(node),
@@ -881,6 +936,9 @@ const Printer = struct {
     /// Un statement complet : indentation + corps + retour ligne.
     fn stmtAt(self: *Printer, node: *const Node) Error!void {
         try self.pad();
+        // Après l'indentation : le mapping pointe le premier caractère de CODE,
+        // pas l'espace qui le précède.
+        try self.mark(node);
         try self.stmt(node);
         try self.nl();
     }
@@ -1257,7 +1315,21 @@ fn isWordUnary(op: ast.UnaryOp) bool {
 
 /// Imprime un programme complet en JS (sémantiquement équivalent à la source).
 pub fn print(node: *const Node, source: []const u8, out: *std.ArrayList(u8), gpa: std.mem.Allocator) Printer.Error!void {
-    var p = Printer{ .source = source, .out = out, .gpa = gpa };
+    try printWith(node, source, out, .{}, gpa);
+}
+
+/// `print`, en enregistrant les positions dans `sink.maps`.
+///
+/// Avec un sink vide la sortie est **bit-identique** à `print` : le marquage
+/// n'ajoute pas un octet au texte, il remplit une liste à côté.
+pub fn printWith(
+    node: *const Node,
+    source: []const u8,
+    out: *std.ArrayList(u8),
+    sink: Sink,
+    gpa: std.mem.Allocator,
+) Printer.Error!void {
+    var p = Printer{ .source = source, .out = out, .gpa = gpa, .maps = sink.maps };
     const prog = node.kind.program;
     for (prog.body) |stmt| try p.stmtAt(stmt);
 }
@@ -1270,7 +1342,20 @@ pub fn print(node: *const Node, source: []const u8, out: *std.ArrayList(u8), gpa
 /// `export const x` perdent leur `export`…). Sans ça il faudrait fabriquer un
 /// faux `program` par statement.
 pub fn printStatement(node: *const Node, source: []const u8, out: *std.ArrayList(u8), gpa: std.mem.Allocator) Printer.Error!void {
-    var p = Printer{ .source = source, .out = out, .gpa = gpa };
+    try printStatementWith(node, source, out, .{}, gpa);
+}
+
+/// `printStatement`, en enregistrant les positions. C'est CETTE variante qu'un
+/// bundler appelle : il imprime statement par statement, et compose les
+/// mappings de chaque module en les décalant de sa position dans le bundle.
+pub fn printStatementWith(
+    node: *const Node,
+    source: []const u8,
+    out: *std.ArrayList(u8),
+    sink: Sink,
+    gpa: std.mem.Allocator,
+) Printer.Error!void {
+    var p = Printer{ .source = source, .out = out, .gpa = gpa, .maps = sink.maps };
     try p.stmtAt(node);
 }
 
@@ -1278,7 +1363,18 @@ pub fn printStatement(node: *const Node, source: []const u8, out: *std.ArrayList
 /// précédence l'exige au niveau assignation. Le pendant de `printStatement`
 /// pour, par exemple, lier un `export default <expression>` à un nom fabriqué.
 pub fn printExpression(node: *const Node, source: []const u8, out: *std.ArrayList(u8), gpa: std.mem.Allocator) Printer.Error!void {
-    var p = Printer{ .source = source, .out = out, .gpa = gpa };
+    try printExpressionWith(node, source, out, .{}, gpa);
+}
+
+/// `printExpression`, en enregistrant les positions.
+pub fn printExpressionWith(
+    node: *const Node,
+    source: []const u8,
+    out: *std.ArrayList(u8),
+    sink: Sink,
+    gpa: std.mem.Allocator,
+) Printer.Error!void {
+    var p = Printer{ .source = source, .out = out, .gpa = gpa, .maps = sink.maps };
     try p.expr(node, PREC_ASSIGN);
 }
 
@@ -1450,4 +1546,170 @@ test "printer : round-trip des attributs sur tout le spectre" {
         "export * as data from './b.json' assert { type: 'json' }",
         "import x from './y' with { 'a-b': 'v', type: 'json' }",
     }) |src| try expectRoundtrip(gpa, src);
+}
+
+// ---- le flux de mappings (source maps) ----
+
+/// Imprime `src` en collectant les positions. Rend la sortie ET les mappings.
+fn printMapped(gpa: std.mem.Allocator, src: []const u8) !struct { code: []u8, maps: []Mapping } {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const program = (try parser.parse(arena.allocator(), src)).program;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    var maps: std.ArrayList(Mapping) = .empty;
+    errdefer maps.deinit(gpa);
+    try printWith(program, src, &out, .{ .maps = &maps }, gpa);
+    return .{ .code = try out.toOwnedSlice(gpa), .maps = try maps.toOwnedSlice(gpa) };
+}
+
+test "mappings : un sink vide laisse la sortie BIT-IDENTIQUE" {
+    const gpa = std.testing.allocator;
+    const src = "const a = 1;\nfunction f(x) { return x + a; }\n";
+    const plain = try printSource(gpa, src);
+    defer gpa.free(plain);
+    const mapped = try printMapped(gpa, src);
+    defer gpa.free(mapped.code);
+    defer gpa.free(mapped.maps);
+    // Le marquage remplit une liste À CÔTÉ : il n'ajoute pas un octet au texte.
+    try std.testing.expectEqualStrings(plain, mapped.code);
+    try std.testing.expect(mapped.maps.len > 0);
+}
+
+test "mappings : chaque position source pointe bien le nœud d'origine" {
+    const gpa = std.testing.allocator;
+    //             0123456789...
+    const src = "const alpha = 1;\nconst beta = alpha;\n";
+    const r = try printMapped(gpa, src);
+    defer gpa.free(r.code);
+    defer gpa.free(r.maps);
+
+    // Tout mapping doit désigner un offset réel du source, et la sortie qu'il
+    // annonce doit exister.
+    for (r.maps) |m| {
+        try std.testing.expect(m.src < src.len);
+        try std.testing.expect(m.out <= r.code.len);
+    }
+    // L'identifiant `alpha` de la LIGNE 2 (offset 30) est mappé : c'est la
+    // référence, pas la déclaration.
+    const ref_at = std.mem.lastIndexOf(u8, src, "alpha").?;
+    var found = false;
+    for (r.maps) |m| {
+        if (m.src == ref_at) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "mappings : un identifiant RENOMMÉ mappe vers son span d'origine" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src = "const longName = 1;\nconsole.log(longName);\n";
+    const program = (try parser.parse(a, src)).program;
+
+    // On renomme comme le fait un linker : le NŒUD reste, seul son texte change.
+    const sem = @import("semantic.zig").analyze(a, program, src);
+    var it = sem.scopes.items[0].bindings.valueIterator();
+    while (it.next()) |b| {
+        if (std.mem.eql(u8, b.*.name, "longName")) b.*.new_name = "z";
+    }
+    @import("mangler.zig").applyRenames(sem);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var maps: std.ArrayList(Mapping) = .empty;
+    defer maps.deinit(gpa);
+    try printWith(program, src, &out, .{ .maps = &maps }, gpa);
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "const z = 1") != null);
+    // LE point : le mapping du `z` émis pointe le `longName` du source. Sans ça
+    // un bundle renommé serait indébogable.
+    const decl_at = std.mem.indexOf(u8, src, "longName").?;
+    const ref_at = std.mem.lastIndexOf(u8, src, "longName").?;
+    var saw_decl = false;
+    var saw_ref = false;
+    for (maps.items) |m| {
+        if (m.src == decl_at) saw_decl = true;
+        if (m.src == ref_at) saw_ref = true;
+    }
+    try std.testing.expect(saw_decl);
+    try std.testing.expect(saw_ref);
+}
+
+test "mappings : le folding GARDE le span de l'expression d'origine" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src = "console.log(1 + 2 * 3);\n";
+    const program = (try parser.parse(a, src)).program;
+    _ = @import("transformer.zig").transform(program, src, a);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var maps: std.ArrayList(Mapping) = .empty;
+    defer maps.deinit(gpa);
+    try printWith(program, src, &out, .{ .maps = &maps }, gpa);
+
+    try std.testing.expect(std.mem.indexOf(u8, out.items, "log(7)") != null);
+    // Le `7` fabriqué par le fold porte le span de `1 + 2 * 3` : cliquer sur le
+    // `7` du bundle renvoie à l'expression qui l'a produit. C'est mieux que
+    // « pas de mapping », et c'est le transformer qui l'offre — on le fixe.
+    const expr_at = std.mem.indexOf(u8, src, "1 + 2").?;
+    var mapped_to_expr = false;
+    for (maps.items) |m| {
+        if (m.src == expr_at) mapped_to_expr = true;
+    }
+    try std.testing.expect(mapped_to_expr);
+}
+
+test "mappings : le JSX injecté n'est PAS mappé (aucun span à pointer)" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src = "const A = () => <b>hi</b>;\n";
+    const program = (try parser.parseWith(a, src, true, false)).program;
+    _ = @import("jsx_transform.zig").transform(program, src, a, .{});
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var maps: std.ArrayList(Mapping) = .empty;
+    defer maps.deinit(gpa);
+    try printWith(program, src, &out, .{ .maps = &maps }, gpa);
+
+    // `jsxTransform` PRÉFIXE le module d'un import qu'aucun caractère du source
+    // n'a écrit. Il ne doit produire aucun mapping : le premier commence APRÈS.
+    const import_end = std.mem.indexOf(u8, out.items, "\n").? + 1;
+    for (maps.items) |m| {
+        try std.testing.expect(m.out >= import_end);
+    }
+    try std.testing.expect(maps.items.len > 0);
+}
+
+test "mappings : printStatementWith compose statement par statement" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const src = "const a = 1;\nconst b = 2;\n";
+    const program = (try parser.parse(a, src)).program;
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var maps: std.ArrayList(Mapping) = .empty;
+    defer maps.deinit(gpa);
+    // Ce que fait un bundler : il choisit les statements un par un.
+    for (program.kind.program.body) |st| {
+        try printStatementWith(st, src, &out, .{ .maps = &maps }, gpa);
+    }
+    // Les offsets de sortie sont CROISSANTS : chaque statement s'ajoute derrière
+    // le précédent, donc les mappings d'un module composent par simple décalage.
+    var prev: u32 = 0;
+    for (maps.items) |m| {
+        try std.testing.expect(m.out >= prev);
+        prev = m.out;
+    }
+    try std.testing.expect(maps.items.len >= 4); // 2 statements + 2 identifiants
 }

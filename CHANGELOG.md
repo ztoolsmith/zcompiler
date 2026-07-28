@@ -4,6 +4,58 @@ Toutes les modifications notables de zcompiler. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; versionnage
 [SemVer](https://semver.org/lang/fr/).
 
+## [0.4.0] — 2026-07-28
+
+La release **« le compilateur au service des source maps »** — troisième retour
+de la règle d'or, demandé par zbundle 0.4.0.
+
+### Ajouté
+
+- **`printer.Mapping { out, src }`** et **`printer.Sink { maps }`** — le printer
+  peut désormais émettre, à côté du texte, le flux des positions : pour chaque
+  chose imprimée, l'offset de SORTIE et l'offset SOURCE dont elle provient.
+  Offsets en **octets** des deux côtés : le printer ne sait pas quel texte
+  entourera sa sortie une fois concaténée, donc il ne convertit pas en
+  ligne/colonne — c'est au consommateur de le faire, une seule fois.
+
+  C'est le dividende des spans byte-exacts posés au jour 1 : la position source
+  était déjà sur chaque nœud, il n'y avait qu'à la faire sortir.
+
+- **`printWith` / `printStatementWith` / `printExpressionWith`** — les variantes
+  qui prennent un `Sink`. Les trois fonctions historiques délèguent avec un sink
+  vide et restent **bit-identiques** : le marquage remplit une liste à côté, il
+  n'ajoute pas un octet au texte.
+
+### Détails
+
+- **Un nœud SYNTHÉTIQUE (`end == 0`) n'est pas mappé.** L'IIFE d'un `enum`,
+  l'appel `jsx()`, l'import que `jsxTransform` injecte : ils ne viennent d'aucun
+  caractère. Les mapper ferait pointer l'octet 0 — le premier caractère du
+  fichier — ce qui est pire que rien. Ne rien émettre est d'ailleurs la BONNE
+  réponse : un segment de source map vaut jusqu'au suivant, donc le synthétique
+  est attribué au statement qui l'entoure.
+
+  `end == 0` est le discriminant, pas `start == 0` : le premier nœud d'un fichier
+  a légitimement `start == 0`.
+
+- **Un littéral né du folding garde le span de l'expression qu'il remplace** — le
+  transformer le renseigne déjà. `1 + 2 * 3` folded en `7` remonte donc à
+  l'expression d'origine. Meilleur que « pas de mapping », et désormais fixé par
+  un test.
+
+- **Le marquage se fait AVANT `litText`**, donc un identifiant renommé (mangling,
+  ou la table cross-module d'un linker) garde le span de son identifiant
+  D'ORIGINE : renommer change le TEXTE d'un nœud, jamais sa position. C'est ce
+  qui rend un bundle renommé débogable, et ça ne coûte rien.
+
+- Granularité : le statement (la ligne) et la feuille identifiant/littéral (la
+  colonne) — ce sur quoi on clique dans un débogueur.
+
+### Vérifié
+
+6 tests dédiés, dont la non-régression bit-identique avec un sink vide. Zéro
+régression : toute la batterie existante intacte.
+
 ## [0.3.1] — 2026-07-26
 
 Release de **documentation**. Aucun changement de code : le compilateur est
