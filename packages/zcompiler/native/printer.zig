@@ -109,6 +109,17 @@ pub const Mapping = struct {
     out: u32,
     /// Offset dans `source` du nœud dont ça provient.
     src: u32,
+    /// Ce qui est émis ici est-il un IDENTIFIANT ?
+    ///
+    /// Un identifiant est la seule chose qui puisse être RENOMMÉE — par le
+    /// mangler, ou par la table cross-module d'un linker. Le consommateur a donc
+    /// besoin de le savoir : c'est là, et seulement là, qu'un nom d'origine
+    /// mérite d'être conservé (le champ `names` d'une source map, qui fait qu'un
+    /// débogueur affiche `helper` sur un bundle où il s'appelle `a`).
+    ///
+    /// Faux pour un statement ou un littéral : rien à renommer, donc rien à
+    /// nommer.
+    name: bool = false,
 };
 
 /// De quoi le printer alimente un consommateur, en plus du texte.
@@ -144,9 +155,18 @@ const Printer = struct {
     /// discriminant sûr (et non `start == 0`, qui est légitime pour le premier
     /// nœud d'un fichier).
     fn mark(self: *Printer, node: *const Node) Error!void {
+        try self.markAs(node, false);
+    }
+
+    /// `mark`, en disant si ce qui suit est un identifiant renommable.
+    fn markAs(self: *Printer, node: *const Node, is_name: bool) Error!void {
         const maps = self.maps orelse return;
         if (node.end == 0) return;
-        try maps.append(self.gpa, .{ .out = @intCast(self.out.items.len), .src = node.start });
+        try maps.append(self.gpa, .{
+            .out = @intCast(self.out.items.len),
+            .src = node.start,
+            .name = is_name,
+        });
     }
 
     fn w(self: *Printer, s: []const u8) Error!void {
@@ -189,7 +209,13 @@ const Printer = struct {
             // table cross-module d'un linker) garde son NŒUD, seul son texte
             // change. Le span pointe donc toujours l'identifiant D'ORIGINE —
             // c'est ce qui rend un bundle renommé débogable, et ça ne coûte rien.
-            .number_literal, .boolean_literal, .identifier, .string_literal => {
+            // L'identifiant est à part : c'est le SEUL nœud renommable, donc le
+            // seul dont un consommateur ait besoin de retrouver le nom source.
+            .identifier => {
+                try self.markAs(node, true);
+                try self.w(node.litText(self.source));
+            },
+            .number_literal, .boolean_literal, .string_literal => {
                 try self.mark(node);
                 try self.w(node.litText(self.source));
             },
@@ -1712,4 +1738,26 @@ test "mappings : printStatementWith compose statement par statement" {
         prev = m.out;
     }
     try std.testing.expect(maps.items.len >= 4); // 2 statements + 2 identifiants
+}
+
+test "mappings : seuls les IDENTIFIANTS sont marqués comme nommables" {
+    const gpa = std.testing.allocator;
+    const src = "const alpha = 42;\n";
+    const r = try printMapped(gpa, src);
+    defer gpa.free(r.code);
+    defer gpa.free(r.maps);
+
+    var names: usize = 0;
+    var others: usize = 0;
+    for (r.maps) |m| {
+        if (m.name) names += 1 else others += 1;
+    }
+    // `alpha` est nommable ; le statement et le littéral `42` ne le sont pas —
+    // on ne renomme pas un nombre.
+    try std.testing.expectEqual(@as(usize, 1), names);
+    try std.testing.expect(others >= 2);
+    for (r.maps) |m| {
+        if (!m.name) continue;
+        try std.testing.expectEqualStrings("alpha", src[m.src .. m.src + 5]);
+    }
 }

@@ -4,6 +4,22 @@ Toutes les modifications notables de zcompiler. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) ; versionnage
 [SemVer](https://semver.org/lang/fr/).
 
+## [0.4.1] — 2026-07-29
+
+### Ajouté
+
+- **`Mapping.name`** — le flux de positions dit désormais si ce qu'il marque est
+  un **identifiant**. Un identifiant est la seule chose qui puisse être renommée
+  (par le mangler, ou par la table cross-module d'un linker), donc la seule dont
+  un consommateur ait besoin de retrouver le nom source. C'est ce qui remplit le
+  champ `names` d'une source map — celui qui fait qu'un débogueur affiche
+  `helper` là où le bundle dit `a`.
+
+  Faux pour un statement ou un littéral : on ne renomme pas un nombre.
+
+Un champ additif avec un défaut, sur une structure de la 0.4.0 : un raffinement
+de la capacité livrée alors, pas une capacité nouvelle — d'où le patch.
+
 ## [0.4.0] — 2026-07-28
 
 La release **« le compilateur au service des source maps »** — troisième retour

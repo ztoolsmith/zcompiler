@@ -1,6 +1,6 @@
 {
   "name": "zcompiler",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Parser écrit en Zig pour Node.js, via zignapi",
   "main": "index.js",
   "types": "index.d.ts",
